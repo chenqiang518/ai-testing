@@ -1,0 +1,23 @@
+[project]
+name = "ai-testing"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.11"
+dependencies = [
+    "appium-python-client>=5.1.2",
+    "beautifulsoup4>=4.13.4",
+    "dashscope>=1.24.1",
+    "langchain>=0.3.26",
+    "langchain-community>=0.3.27",
+    "langchain-core>=0.3.68",
+    "langchain-ollama>=0.3.4",
+    "langchain-openai>=0.3.27",
+    "langchain-qwq>=0.2.0",
+    "langgraph>=0.5.2",
+    "openpyxl",
+    "pandas>=2.3.1",
+    "plantuml>=0.3.0",
+    "pytest>=8.4.1",
+    "requests>=2.32.4",
+    "selenium>=4.34.2",
+]
