@@ -25,6 +25,8 @@ if __name__ == "__main__":
 
     in_memory_vector_store = InMemoryVectorStore(embeddings)
     print(in_memory_vector_store.embeddings)
+
+
     from langchain_chroma import Chroma
 
     chroma_vector_store = Chroma(
