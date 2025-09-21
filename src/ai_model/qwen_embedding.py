@@ -11,7 +11,7 @@ os.environ["DASHSCOPE_BASE_URL"] = "https://dashscope.aliyuncs.com/compatible-mo
 
 # 初始化大模型（支持 function calling）
 # 初始化 Qwen Embedding 模型
-embeddings = DashScopeEmbeddings(
+qwen_embeddings = DashScopeEmbeddings(
     model=model_name   # 这是 Qwen 向量模型
 )
 
@@ -19,11 +19,11 @@ embeddings = DashScopeEmbeddings(
 if __name__ == "__main__":
     # 向量化测试
     query = "LangChain 是什么？"
-    vector = embeddings.embed_query(query)
+    vector = qwen_embeddings.embed_query(query)
     print(len(vector), vector[:10])  # 打印向量长度和前10个数
     from langchain_core.vectorstores import InMemoryVectorStore
 
-    in_memory_vector_store = InMemoryVectorStore(embeddings)
+    in_memory_vector_store = InMemoryVectorStore(qwen_embeddings)
     print(in_memory_vector_store.embeddings)
 
 
@@ -31,7 +31,7 @@ if __name__ == "__main__":
 
     chroma_vector_store = Chroma(
         collection_name="example_collection",
-        embedding_function=embeddings,
+        embedding_function=qwen_embeddings,
         persist_directory="./chroma_langchain_db",  # Where to save data locally, remove if not necessary
     )
     print(chroma_vector_store.embeddings)
