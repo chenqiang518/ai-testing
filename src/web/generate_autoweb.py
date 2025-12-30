@@ -55,13 +55,15 @@ def web_execute_result(self):
     print(steps_info)
     return json.dumps(steps_info)
 
-prompt = PromptTemplate.from_template("""
-你是一个web自动化测试工程师，主要应用的技术栈为pytest + selenium。
-以下为web自动化测试的测试步骤，测试步骤由json结构体描述
-{step}
-
-{input}
-""")
+prompt = PromptTemplate.from_template(
+    """
+        你是一个web自动化测试工程师，主要应用的技术栈为pytest + selenium。
+        以下为web自动化测试的测试步骤，测试步骤由json结构体描述
+        {step}
+        
+        {input}
+    """
+)
 
 chain = (
         RunnablePassthrough.assign(step=web_execute_result)
