@@ -27,11 +27,20 @@ MAX_ELEMENT_COUNT = 150
 #   2. agent 需要的是「有哪些元素、类名/文本是什么」，据此拼 css 选择器；
 #   3. 只抓 button/input（历史实现）会让 agent 看不到 SPA 的导航菜单，
 #      只能凭经验臆测选择器，进而抛 NoSuchElementException。
+# SELECTORS 里为什么混进 `[class*="expand"]` / `[class*="arrow"]` 这类**属性选择器**：
+#   element-ui 树形表格的展开箭头是 `<div class="el-table__expand-icon">`，
+#   既不是 button 也不是 a，只按标签名抓就永远看不见它；实测「行政区域 / 区域名称」
+#   用例里 agent 因为看不到箭头，只能臆造 `td:contains('北京市') + td button`
+#   这种非法 css，连续失败 7 次把 max_iterations 烧光。
+#   顺序也有讲究：可交互元素 -> 结构性小部件 -> 单元格文本 -> 图标，
+#   因为 MAX_ELEMENT_COUNT / MAX_SOURCE_LENGTH 会截断，越靠后越容易被丢掉。
 _SOURCE_JS = r"""
 var KEEP_ATTRS = ['id', 'class', 'name', 'type', 'href', 'placeholder',
                   'role', 'title', 'value', 'index', 'aria-label'];
 var SELECTORS = ['button', 'input', 'textarea', 'select', 'a', 'li', 'label',
-                 'td', 'th', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', '[role]'];
+                 '[class*="expand"]', '[class*="arrow"]', '[class*="switch"]',
+                 '[class*="caret"]', '[class*="tree-node"]',
+                 'td', 'th', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', '[role]', 'i[class]'];
 var MAX_COUNT = arguments[0];
 var seen = new Set();
 var out = [];
@@ -71,6 +80,63 @@ _SNAPSHOT_JS = (
     "return (location.href || '') + '|' + document.querySelectorAll('*').length + '|'"
     " + (document.body ? document.body.innerText.length : 0);"
 )
+
+# ---- 定位表达式：css 与 xpath 双支持 ----
+# 为什么必须支持 xpath：CSS **没有按文本定位的能力**（`:contains()` 是 jQuery /
+# Playwright 的语法，Selenium 只认 CSS Selectors，遇到它会直接抛 InvalidSelectorException）。
+# 而用例里大量步骤是「点击『北京市』左边的那个箭头」这种**按行文本 + 行内小部件**定位的操作，
+# 用 css 根本表达不出来。实测「行政区域 / 区域名称」采集时，agent 连续 7 次提交
+# `li[role='menuitem'].el-submenu:contains('商场管理')` / `td:contains('北京市') + td button`，
+# 每次都 InvalidSelectorException，把 25 轮 max_iterations 烧光，采集到的全是废步骤，
+# 第二环照抄后 run_script 直接报 invalid selector。
+XPATH_PREFIXES = ("//", "(", "./", "xpath=")
+# css 里不支持、但模型高频臆造的「文本伪类」：命中就直接给出可读错误，不进 Selenium
+UNSUPPORTED_CSS_PSEUDO = (":contains(", ":has-text(", ":text(", ":has(")
+
+
+def is_xpath(locator: str) -> bool:
+    """定位表达式是不是 xpath（`//`、`./`、`(`、`xpath=` 开头）。"""
+    return (locator or "").strip().startswith(XPATH_PREFIXES)
+
+
+def normalize_locator(locator: str) -> str:
+    """去掉 `xpath=` 前缀与首尾空白，得到可以直接交给 Selenium 的表达式。"""
+    text = (locator or "").strip()
+    if text.lower().startswith("xpath="):
+        text = text[len("xpath="):].strip()
+    return text
+
+
+def by_of(locator: str) -> str:
+    """定位表达式对应的 Selenium By 常量（xpath / css 自动分流）。"""
+    return By.XPATH if is_xpath(locator) else By.CSS_SELECTOR
+
+
+def validate_locator(locator: str) -> str:
+    """校验并归一定位表达式；非法时抛 ValueError（上层 selenium_tools 降级成 Observation）。
+
+    提前拦掉 `:contains()` 这类伪类，而不是等 Selenium 抛 InvalidSelectorException：
+    后者的报错只有一句 "invalid selector"，模型看不出**该换成什么**，于是原地重试同一个
+    非法选择器；这里把「按文本定位请改用 xpath」的正确写法直接写进错误信息，一轮即可纠偏。
+    """
+    text = normalize_locator(locator)
+    if not text:
+        raise ValueError("定位表达式为空：请传入 css 选择器，或 // 开头的 xpath")
+    if is_xpath(text):
+        return text
+    lowered = text.lower()
+    for pseudo in UNSUPPORTED_CSS_PSEUDO:
+        if pseudo in lowered:
+            raise ValueError(
+                f"css 选择器里出现了 {pseudo.rstrip('(')}：这是 jQuery / Playwright 的语法，"
+                "Selenium 不支持（会抛 InvalidSelectorException），原样重试永远失败。"
+                f"非法表达式：{text}。"
+                "按文本定位请改用 xpath（本框架已支持，// 开头即按 xpath 处理），例如："
+                "//tr[.//td[contains(., '北京市')]]//div[contains(@class, 'el-table__expand-icon')]；"
+                "或先 get_page_source 看清目标元素的标签与 class，再用属性选择器精确定位。"
+            )
+    return text
+
 
 
 def resolve_chromedriver() -> str | None:
@@ -252,30 +318,38 @@ class WebAutoFramework:
                 self.element)
 
     def find(self, locator, timeout: int = DEFAULT_TIMEOUT):
-        """以 css 选择器定位元素（显式等待），返回当前页面元素摘要。
+        """以 css 选择器或 xpath 定位元素（显式等待），返回当前页面元素摘要。
+
+        locator 以 `//`、`./`、`(`、`xpath=` 开头时按 xpath 处理（支持 contains(text(), ...)
+        这类**按文本定位**），其余按 css 处理；`:contains()` 这种 jQuery 伪类会在
+        validate_locator 里被提前拦下并给出改用 xpath 的提示。
 
         定位不到时抛出 TimeoutException（携带可读信息），由上层转成 Observation，
         让 agent 依据摘要重新选择选择器，而不是直接终止整个 chain。
         """
         self._ensure_driver()
-        print(f"find css = {locator}")
+        expression = validate_locator(locator)
+        by = by_of(expression)
+        print(f"find {by} = {expression}")
         element = WebDriverWait(self.driver, timeout).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, locator)),
-            message=f"页面上找不到 css 选择器: {locator}",
+            EC.presence_of_element_located((by, expression)),
+            message=f"页面上找不到定位表达式[{by}]: {expression}",
         )
         self.element = element
         return self.source()
 
     def _texts_of(self, locator: str, timeout: int = DEFAULT_TIMEOUT) -> tuple[str, int]:
-        """返回 locator 匹配到的**所有**元素的文本聚合结果与元素个数。
+        """返回 locator（css 或 xpath）匹配到的**所有**元素的文本聚合结果与元素个数。
 
         为什么不用 find_element（单个）：像 `li[role='menuitem']` 这种导航项选择器会
         匹配多个元素，只取第一个就只能断言到「首页」，导致 agent 反复试错。
         """
         self._ensure_driver()
+        expression = validate_locator(locator)
+        by = by_of(expression)
         elements = WebDriverWait(self.driver, timeout).until(
-            lambda driver: driver.find_elements(By.CSS_SELECTOR, locator) or None,
-            message=f"页面上找不到 css 选择器: {locator}",
+            lambda driver: driver.find_elements(by, expression) or None,
+            message=f"页面上找不到定位表达式[{by}]: {expression}",
         )
         self.element = elements[0]
         return "\n".join((element.text or "") for element in elements), len(elements)

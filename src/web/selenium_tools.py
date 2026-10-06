@@ -13,6 +13,12 @@ web = WebAutoFramework()
 _RETRY_HINT = (
     "请先调用 get_page_source 获取当前页面真实存在的元素列表，"
     "再从中挑选标签/属性构造 css 选择器，不要臆测类名或层级结构。"
+    "css **不支持按文本定位**（`:contains()` / `:has-text()` 是 jQuery、Playwright 的语法，"
+    "Selenium 会抛 InvalidSelectorException，原样重试永远失败）；"
+    "需要按可见文本定位（如「『北京市』那一行左边的展开箭头」）时改用 xpath："
+    "以 // 开头即按 xpath 处理，例如 "
+    "//tr[.//td[contains(., '北京市')]]//div[contains(@class, 'el-table__expand-icon')]。"
+    "同一个表达式已经失败过一次就不要再原样重试，换一种定位方式。"
 )
 
 
@@ -76,14 +82,18 @@ def open(url: str):
 
 @tool
 def find(css: str):
-    """以css选择器定位网页元素（会等待元素出现），返回当前页面可交互元素的html摘要；
-    定位到的元素会被 click / send_keys 复用"""
+    """定位网页元素（会等待元素出现），返回当前页面可交互元素的html摘要；
+    定位到的元素会被 click / send_keys 复用。
+    css 参数支持两种写法：普通 css 选择器（如 "a[href='#/mall/region']"），
+    或以 // 开头的 xpath（需要按可见文本定位时必须用 xpath，如
+    "//tr[.//td[contains(., '北京市')]]//div[contains(@class, 'el-table__expand-icon')]"）"""
     return _execute("find", lambda: web.find(css), on_error_context=web.source)
 
 
 @tool
 def click(css: str = None):
-    """以css的方式定位网页元素后点击，返回点击后页面可交互元素的html摘要"""
+    """定位网页元素后点击（css 参数可传 css 选择器或 // 开头的 xpath，不传则点击上一次
+    find 定位到的元素），返回点击后页面可交互元素的html摘要"""
 
     def _click():
         if css:
@@ -95,7 +105,8 @@ def click(css: str = None):
 
 @tool
 def send_keys(css: str, text: str):
-    """定位到css指定的元素，并输入text，返回输入后页面可交互元素的html摘要"""
+    """定位到 css（css 选择器或 // 开头的 xpath）指定的元素，并输入 text，
+    返回输入后页面可交互元素的html摘要"""
 
     def _send_keys():
         if css:
@@ -120,7 +131,9 @@ def get_page_text():
 @tool
 def assert_contains(text: str, css: str = None):
     """断言：页面（css为空时）或css指定的元素中包含text。
-    text支持用「、」或「,」分隔多个期望文本，全部包含才算通过；返回断言结论，不会抛异常"""
+    text支持用「、」或「,」分隔多个期望文本，全部包含才算通过；返回断言结论，不会抛异常。
+    css 参数可传 css 选择器或 // 开头的 xpath（限定断言范围，如某一行的所有单元格：
+    "//tr[.//td[contains(., '北京市')]]//td"）"""
     return _execute("assert_contains", lambda: web.assert_contains(text, css))
 
 

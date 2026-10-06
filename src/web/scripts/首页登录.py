@@ -17,7 +17,7 @@ def driver():
     yield driver
     driver.quit()
 
-def test_login(driver):
+def login(driver):
     # 打开登录页面
     driver.get("https://litemall.hogwarts.ceshiren.com/#/login?redirect=%2Fdashboard")
 
@@ -48,3 +48,8 @@ def test_login(driver):
     expected_texts = ["首页", "商场管理", "商品管理"]
     for text in expected_texts:
         assert text in driver.page_source
+
+
+def test_login(driver):
+    """pytest 入口：业务流程复用 login(driver)，便于其它用例脚本 import 复用（勿删）。"""
+    login(driver)
