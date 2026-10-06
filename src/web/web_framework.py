@@ -122,12 +122,22 @@ class WebAutoFramework:
             driver_path = resolve_chromedriver()
             service = Service(executable_path=driver_path) if driver_path else None
             options = webdriver.ChromeOptions()
-            options.add_argument("--window-size=1440,900")
+            options.add_argument("--start-maximized")
             options.add_argument("--disable-gpu")
             options.add_argument("--no-sandbox")
             if self.headless:
                 options.add_argument("--headless=new")
             self.driver = webdriver.Chrome(service=service, options=options)
+            self.driver.execute_cdp_cmd("Network.enable", {})
+            self.driver.execute_cdp_cmd(
+                "Network.setExtraHTTPHeaders",
+                {
+                    "headers": {
+                        "Authorization": "Bearer xxxxxx",
+                        "X-Token": "abcdefg"
+                    }
+                }
+            )
             # 隐式等待与显式等待混用会让 WebDriverWait 的超时行为不可预期，
             # 统一只用显式等待。
             self.driver.implicitly_wait(0)

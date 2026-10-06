@@ -24,20 +24,74 @@ from src.ai_model.qwen_model import qwen_model
 from src.web.selenium_tools import tools, web
 from src.utils.script_tools import SCRIPTS_DIR, script_tools
 from src.utils.hub_prompt import pull_prompt
-from src.utils.safe_console_handler import SafeConsoleCallbackHandler
+from src.utils.debug_events import DebugEventFilter
+from src.utils.langchain_debug import (
+    configure_langchain_logging,
+    debug_enabled,
+    describe_logging,
+    resolve_event_filter,
+)
 
-# 启用langchain的debug模式（需要时取消下面两行注释）
-# from langchain_core.globals import set_debug
-# set_debug(True)
+# langchain 控制台日志开关：**默认打开**，控制台会打印
+#   1) llm / tool 两类 tracer 日志：[llm/start]（发给模型的 prompt 消息）、
+#      [llm/end]（模型返回内容与 tool_calls）、[tool/start]（调了哪个工具、传了什么入参）、
+#      [tool/end]（工具返回值）；
+#   2) agent 步骤行：「> Entering new AgentExecutor chain...」「Invoking: `xxx` with ...」
+#      「responded: ...」「> Finished chain.」（来自 verbose 注入的 StdOutCallbackHandler）。
+# 只想看干净输出（业务 print + 最终答案）时二选一关闭：
+#     python src/web/generate_autoweb.py --quiet
+#     LANGCHAIN_DEBUG=0 python src/web/generate_autoweb.py
+#
+# chain 类 tracer 日志默认**不**打印（白名单见下方 DEFAULT_DEBUG_EVENTS）：
+# 实测一次运行会产生 30 条 [chain/start] + 30 条 [chain/end]，
+# 且绝大多数是 RunnableSequence / RunnableLambda / ChatPromptTemplate 这类 LCEL 包装层，
+# 只是把同一份 input/output 层层转述一遍，对排查没帮助却能把 tool/llm 日志冲散。
+# 需要看 chain 时显式覆盖白名单即可（命令行 / 环境变量都优先于这个默认值）：
+#     --debug-events=all                 # 9 类事件全开（含 chain）
+#     --debug-events=chain,tool          # 自己指定组合
+#     --hide-debug-events=llm/end        # 在默认 tool,llm 基础上再去掉大模型返回内容
+#     LANGCHAIN_DEBUG_EVENTS=chain       # 环境变量写法，命令行优先级更高
+#
+# handler 必须由本模块注入**修复版**，而不是让框架自动注入原版 ConsoleCallbackHandler：
+#   - 原版 `_on_tool_start` 写死 `run.inputs["input"]`，遇到「工具入参为 dict」
+#     （structured chat agent 的 action_input 就是 dict）会抛 KeyError('input')，
+#     控制台只留一行 Error in ConsoleCallbackHandler.on_tool_start callback 并丢失 [tool/start]；
+#   - 原版 chat model 的 [llm/start] 会被回退成**一行转义过的 prompt 字符串**：
+#     tracer 默认 _schema_format="original" -> _create_chat_model_run 抛 NotImplementedError
+#     -> handle_event 回退成 on_llm_start(prompts=[get_buffer_string(messages)])。
+#     本项目用的 ChatTongyi 是 chat model，system prompt + 工具清单 + agent_scratchpad
+#     轻松上千字，全挤成一行、\n 变字面量，根本没法读；
+#   - 原版 [llm/end] 直接 dump 整个 LLMResult，嵌套 JSON 里翻不出一句模型回复。
+#   三点都已在 SafeConsoleCallbackHandler 里修好（详见 src/utils/safe_console_handler.py）。
+# 它同时故意不开全局 debug：debug 与 verbose 同时为真时，langchain 会跳过
+# StdOutCallbackHandler，「Invoking: ...」这类 agent 步骤行反而会消失（详见该函数 docstring）。
 
-# debug/verbose 模式下，langchain-core 会自动注入 ConsoleCallbackHandler，
-# 但它在「工具入参为 dict」（structured chat agent 的 action_input 就是 dict）时
-# 会抛 KeyError('input')，导致控制台打印
-#   Error in ConsoleCallbackHandler.on_tool_start callback: KeyError('input')
-# 并丢失 [tool/start] 日志。这里预先注入修复版 handler：
-# _configure() 检测到已存在 ConsoleCallbackHandler 实例（子类同样满足 isinstance）
-# 就不会再注入有缺陷的原版 handler。
-callbacks: list[BaseCallbackHandler] = [SafeConsoleCallbackHandler()]
+# tracer 日志的默认白名单：只打印 tool 与 llm 两类事件
+# （chain 需要显式 --debug-events=all 或 LANGCHAIN_DEBUG_EVENTS=chain 才会出现）
+DEFAULT_DEBUG_EVENTS: str = "tool,llm"
+# 默认打印调试日志（agent 步骤行 + llm/tool tracer 日志）；--quiet / LANGCHAIN_DEBUG=0 关闭
+DEBUG_LOGGING: bool = debug_enabled(default=True)
+EVENT_FILTER: DebugEventFilter = resolve_event_filter(default_only=DEFAULT_DEBUG_EVENTS)
+callbacks: list[BaseCallbackHandler] = configure_langchain_logging(
+    DEBUG_LOGGING, event_filter=EVENT_FILTER
+)
+# 只提示一行当前日志配置（含被隐藏了哪些事件、怎么改），避免使用者不知道日志能开关。
+# 提示语里刻意不写 [chain/start] 这类字面量，否则会污染对日志的 grep 统计
+print(describe_logging(DEBUG_LOGGING, EVENT_FILTER))
+
+# 回调必须通过 invoke(config=...) 下发，**不能**只写 AgentExecutor(callbacks=...)：
+# langchain_classic.chains.base.Chain.invoke 里是
+#     CallbackManager.configure(callbacks_from_config, self.callbacks, self.verbose, ...)
+# 即构造参数走 local_callbacks -> add_handler(handler, inherit=False)，handler 只挂在
+# executor 自己这一层，**到不了嵌套的 chat model / tool run**，于是 [llm/start] /
+# [llm/end] / [tool/start] / [tool/end] 一条都不打印（实测：构造传 + invoke 不带 config
+# => 0 条 llm/tool 日志，只剩 agent 步骤行；改成 config 传 => 全部正常）。
+# 反过来「构造传 + config 也传」会让根节点事件重复打印（同一 handler 被 add 两次，
+# 实测 --debug-events=all 时 [chain/start] 18 条 vs 只用 config 传 13 条），
+# 所以统一只在这里定义一份 run_config，两个 executor 都不再写 callbacks= 参数。
+# --quiet 关闭日志时 callbacks 是空列表，这里归一成 None（RunnableConfig.callbacks
+# 允许 None），语义即「不额外挂任何回调」，一行 tracer 日志都不打。
+run_config: RunnableConfig = {"callbacks": callbacks or None}
 
 # hub 的 structured-chat prompt 会被两个 agent 复用（第一环操作浏览器、第二环读写脚本）。
 # 变量名特意不叫 prompt：历史上第二环用 `prompt = PromptTemplate.from_template(...)`
@@ -49,8 +103,12 @@ web_agent = create_structured_chat_agent(llm, tools, agent_prompt)
 # Create an agent executor by passing in the agent and tools
 web_agent_executor = AgentExecutor(
     agent=web_agent, tools=tools,
-    verbose=True,
-    callbacks=callbacks,
+    # verbose 会额外注入 StdOutCallbackHandler，打印
+    # 「> Entering new AgentExecutor chain...」「Invoking: `tool` with ...」等 agent 步骤行，
+    # 与 tracer 日志共用同一个总开关（默认打开，--quiet / LANGCHAIN_DEBUG=0 关闭）。
+    # 回调**不在这里传**：构造参数是不可继承的 local_callbacks，嵌套的 llm / tool run
+    # 收不到，统一改由 invoke(config=run_config) 下发（见 run_config 处的说明）。
+    verbose=DEBUG_LOGGING,
     return_intermediate_steps=True,
     # 步骤变多（新增 get_page_source / assert_contains 等）后，默认 15 轮容易不够
     max_iterations=25,
@@ -253,8 +311,9 @@ def collect_steps_in_browser() -> str:
     steps_info = []
     error = ""
     try:
-        # 获取执行结果
-        r = web_agent_executor.invoke({"input": query})
+        # 获取执行结果（config=run_config：把修复版 handler 作为**可继承**回调传下去，
+        # 否则这一环的 [llm/*] / [tool/*] 日志一条都不会打印）
+        r = web_agent_executor.invoke({"input": query}, config=run_config)
         # 获取执行记录
         steps = r["intermediate_steps"]
         # 遍历执行步骤，获取每一步的执行步骤以及输入信息
@@ -314,8 +373,11 @@ codegen_prompt = pull_prompt("hwchase17/openai-tools-agent")
 codegen_agent = create_openai_tools_agent(llm, script_tools, codegen_prompt)
 codegen_executor = AgentExecutor(
     agent=codegen_agent, tools=script_tools,
-    verbose=True,
-    callbacks=callbacks,
+    # 同上：verbose 的「Invoking: `write_script` with ...」会把整段生成代码打一遍
+    # （[tool/start] 里也会有一份，两份内容一致、属预期）；嫌长可只关这一类日志：
+    #     --hide-debug-events=tool/start   或   --quiet 全关
+    verbose=DEBUG_LOGGING,
+    # 回调同样只走 invoke(config=run_config)，见 run_config 处的说明
     # 一轮「生成 -> 执行 -> 修复」约 3~4 个 action，15 轮足够跑完 2 轮修复
     max_iterations=15,
     handle_parsing_errors=True)
@@ -324,67 +386,67 @@ codegen_executor = AgentExecutor(
 # 「口头答应」；现在作为 agent 的任务指令，每一条都有对应工具可以真正执行。
 # 注意：本模板用 str.format 渲染，除下面 4 个占位符外不要再出现花括号。
 CODEGEN_TASK = """
-你是一个web自动化测试工程师，主要应用的技术栈为pytest + selenium。
-你的任务：把下面这次真实执行过的测试步骤，落成一个可重复运行的自动化测试脚本。
+    你是一个web自动化测试工程师，主要应用的技术栈为pytest + selenium。
+    你的任务：把下面这次真实执行过的测试步骤，落成一个可重复运行的自动化测试脚本。
+    
+    {task}
+    
+    目标脚本：{scripts_dir} 目录下的 {script_name}
+    
+    本次真实执行过的测试步骤（json 数组，tool 是工具名，input 是工具入参，
+    其中的 css 都是当时页面上真实存在、且已经验证可用的选择器）；
+    如果下面给出的不是步骤 json，而是一段「本轮未采集步骤」的说明，则以该说明为准：
+    {step}
+    
+    必须严格按以下流程使用工具，不要臆测文件是否存在：
+    1. 先调用 list_scripts，确认 {script_name} 是否已经存在；
+    2. 已存在：调用 read_script 读取内容，再调用 run_script 执行验证；执行通过就不必重写；
+    3. 不存在：按下面的「代码规范」生成完整脚本，调用 write_script 保存，再调用 run_script 验证；
+    4. run_script 失败时按工具返回的提示区分处理：脚本步骤失败（定位/超时/语法/导入错误）
+       必须 read_script 后用 write_script 写入修复后的完整代码并重跑，最多修复 2 轮；
+       若同一个原因连续失败两次，说明是环境/被测站点问题，立即停止修复并在 Final Answer 中说明，
+       不要重复写入内容相同的代码；断言失败说明脚本本身跑得通，不要改脚本；
+       若是「元素定位不到 / 等待超时」连续失败两次，很可能是页面结构改版、上面的步骤已过期，
+       此时必须在 Final Answer 中提示：用 `python src/web/generate_autoweb.py --force-collect`
+       重新采集步骤（不要自己臆测新的 css 选择器）；
+    5. 结束后给出 Final Answer，说明脚本绝对路径、执行结论（通过 / 断言失败 / 修复了几轮）与关键改动。
 
-{task}
-
-目标脚本：{scripts_dir} 目录下的 {script_name}
-
-本次真实执行过的测试步骤（json 数组，tool 是工具名，input 是工具入参，
-其中的 css 都是当时页面上真实存在、且已经验证可用的选择器）；
-如果下面给出的不是步骤 json，而是一段「本轮未采集步骤」的说明，则以该说明为准：
-{step}
-
-必须严格按以下流程使用工具，不要臆测文件是否存在：
-1. 先调用 list_scripts，确认 {script_name} 是否已经存在；
-2. 已存在：调用 read_script 读取内容，再调用 run_script 执行验证；执行通过就不必重写；
-3. 不存在：按下面的「代码规范」生成完整脚本，调用 write_script 保存，再调用 run_script 验证；
-4. run_script 失败时按工具返回的提示区分处理：脚本步骤失败（定位/超时/语法/导入错误）
-   必须 read_script 后用 write_script 写入修复后的完整代码并重跑，最多修复 2 轮；
-   若同一个原因连续失败两次，说明是环境/被测站点问题，立即停止修复并在 Final Answer 中说明，
-   不要重复写入内容相同的代码；断言失败说明脚本本身跑得通，不要改脚本；
-   若是「元素定位不到 / 等待超时」连续失败两次，很可能是页面结构改版、上面的步骤已过期，
-   此时必须在 Final Answer 中提示：用 `python src/web/generate_autoweb.py --force-collect`
-   重新采集步骤（不要自己臆测新的 css 选择器）；
-5. 结束后给出 Final Answer，说明脚本绝对路径、执行结论（通过 / 断言失败 / 修复了几轮）与关键改动。
-
-代码规范：
-- 用 pytest 组织：driver 放在 fixture 里，yield 之后 driver.quit()，保证异常路径也能关浏览器；
-  测试函数必须以 test_ 开头，否则 pytest 收集不到用例；
-- fixture 里创建 driver 后必须调用 driver.maximize_window()：采集步骤时浏览器是全屏的
-  （这一步不会记录在步骤 json 里），而 element-plus 是响应式布局，窗口过窄会把侧边栏
-  菜单折叠掉，导致 li[role='menuitem'] 这类元素定位超时；
-- 只使用显式等待（WebDriverWait + expected_conditions），禁止 time.sleep 硬等待；
-  点击/跳转之后的每一步定位都要用显式等待，禁止裸用 driver.find_element 直接取元素；
-- 向输入框输入前**必须先清空**：对显式等待拿到的元素先 element.clear() 再
-  element.send_keys(text)。页面输入框可能已有默认值或上次输入的残留，不清空会拼成
-  「旧值+新值」，导致登录提交失败；禁止用 send_keys 覆盖输入而省略 clear()；
-- 点击前用 EC.element_to_be_clickable 等待，
-  仅用 presence_of_element_located 拿到元素就 click，会在 Vue 绑定事件前点到，登录不会真正提交；
-- 点击登录之后必须先等页面跳转完成再断言，例如
-      WebDriverWait(driver, 20).until(EC.url_contains("#/dashboard"))
-  不要在 click() 后立刻 assert driver.current_url——本用例登录页 URL 本身就带
-  redirect=%2Fdashboard，写 assert 'dashboard' in driver.current_url 是**永真断言**（假阳性）；
-- css 选择器必须原样照抄步骤 json 里的值，用双引号包裹即可（如 "li[role='menuitem']"）；
-  禁止改写成等价形式，尤其禁止 find_elements(By.TAG_NAME, 'li') 再靠
-  get_attribute('attributes') 过滤——该属性在 Selenium 中恒为 None，且登录页没有 li 会等到超时；
-- 启动浏览器必须显式指定本地驱动，否则会触发 Selenium Manager 联网下载驱动、卡到执行超时：
-      from selenium.webdriver.chrome.service import Service
-      from src.web.web_framework import resolve_chromedriver
-      driver_path = resolve_chromedriver()
-      driver = webdriver.Chrome(service=Service(driver_path)) if driver_path else webdriver.Chrome()
-  禁止使用 webdriver.Chrome(executable_path=...)——Selenium 4 已移除该参数，会直接 TypeError；
-  也不要 import 了 resolve_chromedriver 却不使用；
-- 元素定位的 css 选择器只能取自上面步骤 json 中真实出现过的 css 值，禁止凭经验臆测类名或层级；
-- 步骤 json 里 assert_contains 的 text 参数是「用、分隔的多个期望文本」，生成代码时必须拆成
-  多个独立断言（逐个判断文本是否出现在页面/元素中），不要把整串当成一个文本来匹配；
-  css 参数（若存在）表示断言范围的选择器，该选择器通常匹配**多个**元素，必须用
-  driver.find_elements（复数）取全部元素、聚合它们的 text 之后再逐个断言；
-  用 find_element（单数）只会拿到第一个元素，必然出现 assert '商场管理' in '首页' 这种假失败，
-  这属于脚本缺陷、必须修，不要当成被测系统的问题；
-- f-string 里的变量占位符只写一层花括号（写成 f"缺少 {{{{text}}}}" 是错的，应写 f"缺少 {{text}}"）；
-- 调用 write_script 时 code 参数必须是完整可运行的 Python 代码：不要 markdown 围栏、不要解释文字。
+    代码规范：
+    - 用 pytest 组织：driver 放在 fixture 里，yield 之后 driver.quit()，保证异常路径也能关浏览器；
+      测试函数必须以 test_ 开头，否则 pytest 收集不到用例；
+    - fixture 里创建 driver 后必须调用 driver.maximize_window()：采集步骤时浏览器是全屏的
+      （这一步不会记录在步骤 json 里），而 element-plus 是响应式布局，窗口过窄会把侧边栏
+      菜单折叠掉，导致 li[role='menuitem'] 这类元素定位超时；
+    - 只使用显式等待（WebDriverWait + expected_conditions），禁止 time.sleep 硬等待；
+      点击/跳转之后的每一步定位都要用显式等待，禁止裸用 driver.find_element 直接取元素；
+    - 向输入框输入前**必须先清空**：对显式等待拿到的元素先 element.clear() 再
+      element.send_keys(text)。页面输入框可能已有默认值或上次输入的残留，不清空会拼成
+      「旧值+新值」，导致登录提交失败；禁止用 send_keys 覆盖输入而省略 clear()；
+    - 点击前用 EC.element_to_be_clickable 等待，
+      仅用 presence_of_element_located 拿到元素就 click，会在 Vue 绑定事件前点到，登录不会真正提交；
+    - 点击登录之后必须先等页面跳转完成再断言，例如
+          WebDriverWait(driver, 20).until(EC.url_contains("#/dashboard"))
+      不要在 click() 后立刻 assert driver.current_url——本用例登录页 URL 本身就带
+      redirect=%2Fdashboard，写 assert 'dashboard' in driver.current_url 是**永真断言**（假阳性）；
+    - css 选择器必须原样照抄步骤 json 里的值，用双引号包裹即可（如 "li[role='menuitem']"）；
+      禁止改写成等价形式，尤其禁止 find_elements(By.TAG_NAME, 'li') 再靠
+      get_attribute('attributes') 过滤——该属性在 Selenium 中恒为 None，且登录页没有 li 会等到超时；
+    - 启动浏览器必须显式指定本地驱动，否则会触发 Selenium Manager 联网下载驱动、卡到执行超时：
+          from selenium.webdriver.chrome.service import Service
+          from src.web.web_framework import resolve_chromedriver
+          driver_path = resolve_chromedriver()
+          driver = webdriver.Chrome(service=Service(driver_path)) if driver_path else webdriver.Chrome()
+      禁止使用 webdriver.Chrome(executable_path=...)——Selenium 4 已移除该参数，会直接 TypeError；
+      也不要 import 了 resolve_chromedriver 却不使用；
+    - 元素定位的 css 选择器只能取自上面步骤 json 中真实出现过的 css 值，禁止凭经验臆测类名或层级；
+    - 步骤 json 里 assert_contains 的 text 参数是「用、分隔的多个期望文本」，生成代码时必须拆成
+      多个独立断言（逐个判断文本是否出现在页面/元素中），不要把整串当成一个文本来匹配；
+      css 参数（若存在）表示断言范围的选择器，该选择器通常匹配**多个**元素，必须用
+      driver.find_elements（复数）取全部元素、聚合它们的 text 之后再逐个断言；
+      用 find_element（单数）只会拿到第一个元素，必然出现 assert '商场管理' in '首页' 这种假失败，
+      这属于脚本缺陷、必须修，不要当成被测系统的问题；
+    - f-string 里的变量占位符只写一层花括号（写成 f"缺少 {{{{text}}}}" 是错的，应写 f"缺少 {{text}}"）；
+    - 调用 write_script 时 code 参数必须是完整可运行的 Python 代码：不要 markdown 围栏、不要解释文字。
 """
 
 # 第一环跳过采集时（脚本已存在），填进 CODEGEN_TASK 里 {step} 位置的替代说明。
@@ -423,9 +485,11 @@ def persist_and_verify(inputs: dict) -> str:
         scripts_dir=SCRIPTS_DIR,
     )
     try:
-        # callbacks 已在 AgentExecutor 构造时注入（含 SafeConsoleCallbackHandler），
-        # 这里不再重复传 config，避免同一 handler 被挂两层
-        result = codegen_executor.invoke({"input": task})
+        # config=run_config 把修复版 handler 作为**可继承**回调传下去（构造参数是不可继承的
+        # local_callbacks，见 run_config 处的说明）。本函数常被单独 import 调用
+        # （`from src.web.generate_autoweb import persist_and_verify`），那种情况下没有
+        # 外层 chain 的环境上下文可继承，显式传 config 才拿得到 llm/tool 日志。
+        result = codegen_executor.invoke({"input": task}, config=run_config)
         return result.get("output", "")
     except Exception as exc:  # noqa: BLE001 - 保证外层 chain 仍能给出结论
         message = f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
@@ -437,8 +501,6 @@ chain = (
         | RunnableLambda(persist_and_verify)
 )
 
-run_config: RunnableConfig = {"callbacks": callbacks}
-
 
 def main() -> None:
     """完整链路：（仅在脚本缺失时）跑浏览器 agent 收集真实步骤 -> 代码生成 agent 落盘/执行/修复。
@@ -447,6 +509,14 @@ def main() -> None:
     （见 resolve_steps），于是「一次运行只登录一次」：登录只发生在 run_script 执行
     脚本时。需要重新采集步骤（页面改版、想重建脚本）请加 --force-collect，
     或设置环境变量 FORCE_COLLECT=1。
+
+    控制台日志**默认打开**：会打印 agent 步骤行（「> Entering new AgentExecutor
+    chain...」「Invoking: `run_script` with ...」「> Finished chain.」）与 llm / tool
+    两类 tracer 日志（[llm/start] 发给模型的 prompt、[llm/end] 模型返回、
+    [tool/start] 工具入参、[tool/end] 工具返回值）；chain 类日志默认隐藏，
+    加 --debug-events=all 可以一并显示。想要干净输出（只有业务 print 与最终答案）
+    就加 --quiet，或设环境变量 LANGCHAIN_DEBUG=0；这些开关与 --force-collect
+    可叠加使用。
 
     包在 main() + __main__ 守卫里（与 generate_autoapp.py 的约定一致）：
     这样其他模块可以 `from src.web.generate_autoweb import persist_and_verify`
@@ -458,10 +528,13 @@ def main() -> None:
              首先在 `{SCRIPTS_DIR}` 文件夹下查找是否存在对应自动化脚本 `{SCRIPT_NAME}`，
              如果存在则直接执行，执行时如果是脚本执行步骤失败(断言成功/失败不在判断范围内)，则修复脚本直到除断言之外的执行步骤全部成功
              如果不存在则按照测试步骤生成自动化测试脚本且保存在: {SCRIPTS_DIR} 文件夹下，名称为 {SCRIPT_NAME}
-             """
+            """
          },
-        # 外层也注入修复版 handler：一是保证外层 chain 的 debug 日志同样安全，
-        # 二是 langchain 对同一 handler 实例会去重，不会与 AgentExecutor 上的重复打印
+        # run_config 带上修复版 handler（可继承）：外层 chain 的 tracer 日志不会触发原版
+        # ConsoleCallbackHandler 的 KeyError('input')，并顺着 LCEL 的环境上下文继承给
+        # 两个 RunnableLambda 里的 executor.invoke（它们自己也显式传了同一份 config，
+        # 单独 import persist_and_verify 调用时同样有日志）。
+        # --quiet 时 callbacks 为 None，外层 chain 一行 tracer 日志都不打。
         config=run_config,
     ))
 
