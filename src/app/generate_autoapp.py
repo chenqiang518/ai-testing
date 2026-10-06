@@ -1,25 +1,32 @@
 # 获取执行结果
 import json
-from langchain import hub
-from langchain.agents import create_structured_chat_agent, AgentExecutor
-from langchain.globals import set_debug
+from langchain_classic.agents import create_structured_chat_agent, AgentExecutor
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.agents import AgentAction
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.runnables import RunnableConfig, RunnableLambda, RunnablePassthrough
 
 from src.app.appium_tools import tools
 from src.ai_model.qwen_model import qwen_model
+from src.utils.hub_prompt import pull_prompt
+from src.utils.safe_console_handler import SafeConsoleCallbackHandler
 
-# set_debug(True)
+# 如需打印 langchain debug 日志：from langchain_core.globals import set_debug; set_debug(True)
 
-prompt = hub.pull("hwchase17/structured-chat-agent")
+# debug 模式下 langchain-core 会自动注入 ConsoleCallbackHandler，
+# 而它在「工具入参为 dict」（structured chat agent 的 action_input 就是 dict）时
+# 会抛 KeyError('input')。预先注入修复版 handler 即可避免（详见模块 docstring）。
+callbacks: list[BaseCallbackHandler] = [SafeConsoleCallbackHandler()]
+
+prompt = pull_prompt("hwchase17/structured-chat-agent")
 llm = qwen_model #ChatOpenAI()
 app_agent = create_structured_chat_agent(llm, tools, prompt)
 # Create an agent executor by passing in the agent and tools
 app_agent_executor = AgentExecutor(
     agent=app_agent, tools=tools,
     verbose=True,
+    callbacks=callbacks,
     return_intermediate_steps=True,
     handle_parsing_errors=True)
 
@@ -34,7 +41,7 @@ query = """
 5. 返回上一级页面
 """
 
-def app_execute_result(self):
+def app_execute_result(_inputs: dict) -> str:
     # 获取执行结果
     r = app_agent_executor.invoke({"input": query})
     # 获取执行记录
@@ -61,11 +68,15 @@ if __name__ == '__main__':
 
     chain = (
             RunnablePassthrough.
-            assign(step=app_execute_result)
+            assign(step=RunnableLambda(app_execute_result))
             | prompt_testcase
             | llm
             | StrOutputParser()
     )
 
-    print(chain.invoke({"input": "请根据以上的信息，给出对应的app自动化测试的代码"}))
+    run_config: RunnableConfig = {"callbacks": callbacks}
+    print(chain.invoke(
+        {"input": "请根据以上的信息，给出对应的app自动化测试的代码"},
+        config=run_config,
+    ))
 

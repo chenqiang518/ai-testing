@@ -4,13 +4,14 @@ from langchain_community.document_loaders import TextLoader
 from langchain_community.vectorstores.faiss import FAISS
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain.agents import AgentExecutor, create_openai_tools_agent
-from langchain import hub
+from langchain_classic.agents import AgentExecutor, create_openai_tools_agent
 from plantuml import PlantUML
 
+from src.utils.hub_prompt import pull_prompt
+
 # 配置请求openai的key和地址
-os.environ['OPENAI_API_KEY']='536ee59f7b7bf5f5347298593828fcaб'
-os.environ['OPENAI_API_BASE']='https://apitoken.ceba.ceshiren.com/openai/v1/'
+# os.environ['OPENAI_API_KEY']=
+# os.environ['OPENAI_API_BASE']=
 # 声明模型
 llm = ChatOpenAI()
 # # 1. 读取文件。
@@ -22,7 +23,7 @@ embeddings = OpenAIEmbeddings()
 vector = FAISS.from_documents(data, embeddings)
 retriever = vector.as_retriever()
 
-from langchain.tools.retriever import create_retriever_tool
+from langchain_core.tools.retriever import create_retriever_tool
 
 retriever_tool = create_retriever_tool(
     retriever,
@@ -40,7 +41,7 @@ def generate_png(uml_code, filename):
 tools = [retriever_tool, generate_png]
 llm_with_tools = llm.bind_tools(tools)
 
-prompt = hub.pull("hwchase17/openai-tools-agent")
+prompt = pull_prompt("hwchase17/openai-tools-agent")
 agent = create_openai_tools_agent(llm, tools, prompt, )
 agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
 result = agent_executor.invoke({

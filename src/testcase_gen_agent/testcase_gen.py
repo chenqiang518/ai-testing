@@ -1,15 +1,36 @@
 from pprint import pp
+from typing import Any, TypedDict, cast
 
 import requests
 from bs4 import BeautifulSoup
-from langchain.globals import set_verbose, set_debug
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.globals import set_verbose, set_debug
+from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel
 
-from src.ai_model.ollama_model import model_ollama
+from src.ai_model.ollama_model import ollama_model
+from src.utils.safe_console_handler import SafeConsoleCallbackHandler
 
 set_verbose(True)
 set_debug(True)
+
+# langgraph 的 ToolNode 同样以 dict 形式传参调用工具，
+# debug 模式下 langchain-core 自带的 ConsoleCallbackHandler 会抛 KeyError('input')，
+# 这里注入修复版 handler（详见模块 docstring）。
+callbacks: list[BaseCallbackHandler] = [SafeConsoleCallbackHandler()]
+
+
+class AgentInput(TypedDict):
+    """create_agent 的入参状态。
+
+    只需提供 messages，其余状态（如 remaining_steps）由图内部维护。
+    显式声明 TypedDict 可满足 CompiledStateGraph.invoke 对 InputT 的泛型约束，
+    避免直接传 dict 字面量时的类型告警。
+    """
+
+    messages: list[BaseMessage]
 
 class TestCaseModel(BaseModel):
 
@@ -70,13 +91,13 @@ def testcase_save(testcase_list: list[TestCaseModel]):
 
 
 tools = [ get,read_file, testcase_save ]
-agent = create_react_agent(
-    model=model_ollama,
+agent = create_agent(
+    model=ollama_model,
     tools=tools,
-    prompt="""
+    system_prompt="""
     你是软件测试工程师，你擅长做自动化测试。
     你可以根据用户提供的网址，进行网页分析，并仅编写完整的测试用例，不执行自动化测试。
-    """
+    """,
 )
 
 
@@ -84,15 +105,16 @@ def test_gen():
     query = """
     https://www.baidu.com/
     """
+    state: AgentInput = {"messages": [HumanMessage(query)]}
+    run_config: RunnableConfig = {
+        "recursion_limit": 100,
+        "callbacks": callbacks,
+    }
     response = agent.invoke(
-        input={
-            "messages": [
-                ("user", query)
-            ]
-        },
-        config={
-            "recursion_limit": 100
-        }
+        # langgraph 把 invoke 的 InputT 约束为 TypedDictLike 协议，PyCharm 无法把
+        # 具体的 TypedDict 结构匹配上去（属静态检查局限，运行时完全正常），故显式 cast
+        input=cast(Any, state),
+        config=run_config
     )
     pp(response, indent=2)
 

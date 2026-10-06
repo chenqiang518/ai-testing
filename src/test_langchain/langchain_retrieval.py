@@ -2,6 +2,13 @@
 # -*- coding: utf-8 -*-
 
 import os
+import sys
+
+# 项目未以包形式安装（pyproject.toml 无 build-system），
+# 用 `python src/test_langchain/langchain_retrieval.py` 直接运行时，sys.path[0] 是脚本所在目录，
+# 会导致 ModuleNotFoundError: No module named 'src'。这里把项目根目录加入 sys.path。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 # 提前设置 UA
 os.environ["USER_AGENT"] = "MyLangChainBot/1.0"
 
@@ -12,19 +19,21 @@ from uuid import uuid4
 import faiss
 
 from langchain_community.document_loaders import SitemapLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.docstore.in_memory import InMemoryDocstore
-from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
-from langchain.chains import create_retrieval_chain
+from langchain_classic.chains import create_retrieval_chain
 
 # 引入你的嵌入模型和大模型
 from src.ai_model.qwen_embedding import qwen_embeddings
 from src.ai_model.qwen_model import qwen_model
 
 # 向量库存储目录
-INDEX_DIR = Path("faiss_index")
+# 以脚本所在目录为基准，避免因运行时工作目录不同（如项目根目录）而找不到已有向量库、
+# 进而重复抓取整个 sitemap
+INDEX_DIR = Path(__file__).resolve().parent / "faiss_index"
 batch_size = 10
 
 if INDEX_DIR.exists():

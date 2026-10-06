@@ -1,0 +1,38 @@
+# ---- Python 字节码 / 缓存（此前被误提交，是 diff 乱码的根源）----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- 测试与工具缓存 ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+cache/
+# AI 采集的浏览器步骤缓存（内容取决于线上页面实时结构，属机器产物，不提交）
+.steps/
+
+# ---- IDE / 编辑器 ----
+.idea/
+.vscode/
+*.swp
+
+# ---- macOS ----
+.DS_Store
+
+# ---- 构建产物 ----
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# 注意：uv.lock / pyproject.toml 需要保留，不要忽略
