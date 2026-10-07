@@ -9,6 +9,8 @@ from langchain_core.messages.ai import ToolCall
 from langchain_core.outputs import ChatResult
 from langchain_core.output_parsers.openai_tools import parse_tool_call
 
+from src.utils.json_repair import repair_json_arguments
+
 
 model_name = "qwen-max"
 
@@ -20,12 +22,17 @@ model_name = "qwen-max"
 def _repair_arguments(arguments: Any) -> Optional[str]:
     """把模型输出的「非法 JSON」入参修成合法的；修不了返回 None。
 
-    实测 DashScope function calling 的两个高频问题（都会在 write_script 这类
+    实测 DashScope function calling 的三个高频问题（都会在 write_script 这类
     「入参是大段多行代码」的工具上必现）：
         1. 代码里的单引号被转义成 ``\\'``——JSON 规范里没有这个转义，
            json.loads 直接报 Invalid \\escape；
         2. 字符串里夹裸换行/制表符——JSON 规范要求写成 \\n / \\t，
-           但 ``json.loads(..., strict=False)`` 可以容忍。
+           但 ``json.loads(..., strict=False)`` 可以容忍；
+        3. **代码里的裸双引号没转义**（如 ``assert "省电" in text``）——它会把 JSON
+           字符串提前截断，前两类修法都无效，必须按字符串边界逐字符扫描才修得动。
+           这一类交给 src/utils/json_repair.repair_json_arguments（web / app 两个生成域
+           共用的同一份实现，早先只有 web 侧的解析器链路上挂了它，模型出口这一层没有，
+           于是同一个坏载荷在两层各修一半、最终还是抛 OutputParserException）。
     """
     if not isinstance(arguments, str) or not arguments:
         return None
@@ -38,7 +45,15 @@ def _repair_arguments(arguments: Any) -> Optional[str]:
             except (json.JSONDecodeError, TypeError):
                 continue
             return candidate
-    return None
+
+    repaired = repair_json_arguments(arguments)
+    if repaired == arguments:
+        return None  # 共享修复也修不动：保持 None，由框架按原路径报错
+    try:
+        json.loads(repaired, strict=False)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return repaired
 
 
 def _repair_message_tool_calls(message: AIMessage) -> bool:

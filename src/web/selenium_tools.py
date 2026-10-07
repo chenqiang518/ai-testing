@@ -10,16 +10,14 @@ web = WebAutoFramework()
 # 定位失败时给 agent 的纠错提示：历史问题是 agent 看不到导航菜单元素，
 # 只能凭经验臆测出 `.el-menu-vertical-demo [role='menu']` 这类不存在的选择器，
 # 抛出的 NoSuchElementException 又没被兜住，直接终止了整个 chain。
-_RETRY_HINT = (
-    "请先调用 get_page_source 获取当前页面真实存在的元素列表，"
-    "再从中挑选标签/属性构造 css 选择器，不要臆测类名或层级结构。"
-    "css **不支持按文本定位**（`:contains()` / `:has-text()` 是 jQuery、Playwright 的语法，"
-    "Selenium 会抛 InvalidSelectorException，原样重试永远失败）；"
-    "需要按可见文本定位（如「『北京市』那一行左边的展开箭头」）时改用 xpath："
-    "以 // 开头即按 xpath 处理，例如 "
-    "//tr[.//td[contains(., '北京市')]]//div[contains(@class, 'el-table__expand-icon')]。"
-    "同一个表达式已经失败过一次就不要再原样重试，换一种定位方式。"
-)
+_RETRY_HINT = """请先调用 get_page_source 获取当前页面真实存在的元素列表，\
+    再从中挑选标签/属性构造 css 选择器，不要臆测类名或层级结构。\
+    css **不支持按文本定位**（`:contains()` / `:has-text()` 是 jQuery、Playwright 的语法，\
+    Selenium 会抛 InvalidSelectorException，原样重试永远失败）；\
+    需要按可见文本定位（如「『北京市』那一行左边的展开箭头」）时改用 xpath：\
+    以 // 开头即按 xpath 处理，例如 \
+    //tr[.//td[contains(., '北京市')]]//div[contains(@class, 'el-table__expand-icon')]。\
+    同一个表达式已经失败过一次就不要再原样重试，换一种定位方式。"""
 
 
 def _error_message(exc: BaseException) -> str:

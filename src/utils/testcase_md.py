@@ -360,8 +360,8 @@ def load_test_cases(path: Union[str, Path]) -> list[TestCase]:
     file_path = Path(path)
     if not file_path.is_file():
         raise FileNotFoundError(
-            f"测试用例文档不存在：{file_path}。请确认路径，"
-            f"或用 --case-file=<md 路径> 指定其它用例文档（如 src/app/testcase/ip.md）"
+            f"""测试用例文档不存在：{file_path}。请确认路径，\
+            或用 --case-file=<md 路径> 指定其它用例文档（如 src/app/testcase/ip.md）"""
         )
     try:
         text = file_path.read_text(encoding="utf-8")
@@ -370,9 +370,9 @@ def load_test_cases(path: Union[str, Path]) -> list[TestCase]:
     cases = parse_test_cases(text, source=file_path)
     if not cases:
         raise ValueError(
-            f"测试用例文档里没有解析到任何用例：{file_path}。"
-            f"一条用例需要「标题 + 测试步骤（或预期结果）」，形如："
-            f"`# 1. 首页登录` 换行 `- 测试步骤:` 换行 `    1. 打开 ...`"
+            f"""测试用例文档里没有解析到任何用例：{file_path}。\
+            一条用例需要「标题 + 测试步骤（或预期结果）」，形如：\
+            `# 1. 首页登录` 换行 `- 测试步骤:` 换行 `    1. 打开 ...`"""
         )
     return cases
 

@@ -3,6 +3,7 @@ from src.app.app_framework import (
     create_driver, locate, locate_all, scroll_to, texts_of, page_text,
 )
 
+
 @pytest.fixture
 def driver():
     driver = create_driver(app_activity=".Settings", app_package="com.android.settings")
@@ -20,8 +21,12 @@ def more_connections_print(driver):
     assert print_option is not None, '未能找到「打印」设置项'
     print_option.click()
     
+    # 显式等待「系统打印服务」控件出现（locate 内部即 WebDriverWait + presence_of_element_located）
+    locate(driver, "//*[contains(@text,'系统打印服务')]", timeout=10)
+    
     # 断言页面中包含'系统打印服务'
-    assert '系统打印服务' in page_text(driver), '界面未包含「系统打印服务」，实际片段：' + page_text(driver)[:300]
+    text = page_text(driver)
+    assert '系统打印服务' in text, f'界面未包含「系统打印服务」，实际片段：{text[:300]}'
     
     # 返回上一级
     driver.back()

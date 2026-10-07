@@ -83,9 +83,9 @@ def normalize_token(token: str) -> str:
 def _invalid_token_error(token: str, field_name: str) -> ValueError:
     valid = ", ".join([ALL_TOKEN, NONE_TOKEN, *EVENT_PHASES, *EVENT_ORDER])
     return ValueError(
-        f"{field_name} 中的 {token!r} 不是合法的 tracer 事件名。\n"
-        f"可用值：{valid}\n"
-        f"（也可只写类别名，如 `tool` 表示 tool/start + tool/end + tool/error）"
+        f"""{field_name} 中的 {token!r} 不是合法的 tracer 事件名。
+        可用值：{valid}
+        （也可只写类别名，如 `tool` 表示 tool/start + tool/end + tool/error）"""
     )
 
 

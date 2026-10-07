@@ -240,27 +240,19 @@ def describe_logging(
     每种状态都同时给出「反方向」的开关，使用者不必回头翻代码就知道怎么改。
     """
     if not enabled:
-        return (
-            "langchain 调试日志已关闭（chain / llm / tool 的 tracer 日志与 agent 步骤行"
-            "都不打印）；加 --debug 或设 LANGCHAIN_DEBUG=1 重新打开"
-        )
+        return """langchain 调试日志已关闭（chain / llm / tool 的 tracer 日志与 agent 步骤行\
+        都不打印）；加 --debug 或设 LANGCHAIN_DEBUG=1 重新打开"""
     if event_filter is None or event_filter.allows_all:
-        return (
-            "langchain 调试日志已开启（tracer 事件全开）；"
-            "可用 --hide-debug-events=chain,llm/end 精确隐藏其中某几个，"
-            "或加 --quiet / 设 LANGCHAIN_DEBUG=0 全部关闭"
-        )
+        return """langchain 调试日志已开启（tracer 事件全开）；\
+        可用 --hide-debug-events=chain,llm/end 精确隐藏其中某几个，\
+        或加 --quiet / 设 LANGCHAIN_DEBUG=0 全部关闭"""
     if event_filter.allows_none:
-        return (
-            "langchain 调试日志已开启，但 tracer 事件被全部隐藏（只保留 agent 步骤行）；"
-            "检查 --debug-events / --hide-debug-events 是否配置过头"
-        )
-    return (
-        f"langchain 调试日志已开启；tracer 事件保留：{event_filter.describe()}；"
-        f"已隐藏：{event_filter.describe_hidden()}"
-        f"（加 --debug-events=all 可显示全部 9 类事件；加 --quiet 或设 LANGCHAIN_DEBUG=0"
-        f" 可全部关闭）"
-    )
+        return """langchain 调试日志已开启，但 tracer 事件被全部隐藏（只保留 agent 步骤行）；\
+        检查 --debug-events / --hide-debug-events 是否配置过头"""
+    return f"""langchain 调试日志已开启；tracer 事件保留：{event_filter.describe()}；\
+    已隐藏：{event_filter.describe_hidden()}\
+    （加 --debug-events=all 可显示全部 9 类事件；加 --quiet 或设 LANGCHAIN_DEBUG=0 \
+    可全部关闭）"""
 
 
 def langchain_debug(enabled: bool = True) -> None:

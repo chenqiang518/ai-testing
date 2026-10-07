@@ -128,12 +128,12 @@ def validate_locator(locator: str) -> str:
     for pseudo in UNSUPPORTED_CSS_PSEUDO:
         if pseudo in lowered:
             raise ValueError(
-                f"css 选择器里出现了 {pseudo.rstrip('(')}：这是 jQuery / Playwright 的语法，"
-                "Selenium 不支持（会抛 InvalidSelectorException），原样重试永远失败。"
-                f"非法表达式：{text}。"
-                "按文本定位请改用 xpath（本框架已支持，// 开头即按 xpath 处理），例如："
-                "//tr[.//td[contains(., '北京市')]]//div[contains(@class, 'el-table__expand-icon')]；"
-                "或先 get_page_source 看清目标元素的标签与 class，再用属性选择器精确定位。"
+                f"""css 选择器里出现了 {pseudo.rstrip('(')}：这是 jQuery / Playwright 的语法，\
+                Selenium 不支持（会抛 InvalidSelectorException），原样重试永远失败。\
+                非法表达式：{text}。\
+                按文本定位请改用 xpath（本框架已支持，// 开头即按 xpath 处理），例如：\
+                //tr[.//td[contains(., '北京市')]]//div[contains(@class, 'el-table__expand-icon')]；\
+                或先 get_page_source 看清目标元素的标签与 class，再用属性选择器精确定位。"""
             )
     return text
 

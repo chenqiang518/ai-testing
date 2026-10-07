@@ -93,9 +93,16 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from langchain_classic.agents import AgentExecutor, create_structured_chat_agent
+from langchain_classic.agents.format_scratchpad.openai_tools import (
+    format_to_openai_tool_messages,
+)
+from langchain_classic.agents.output_parsers.openai_tools import (
+    OpenAIToolsAgentOutputParser,
+)
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnableConfig, RunnableLambda, RunnablePassthrough
+from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from src.ai_model.qwen_model import qwen_model
 from src.app.app_framework import (
@@ -115,6 +122,7 @@ from src.app.appium_tools import (
 )
 from src.utils.debug_events import DebugEventFilter
 from src.utils.hub_prompt import pull_prompt
+from src.utils.json_repair import repair_json_arguments, repair_tool_call_arguments
 from src.utils.langchain_debug import (
     configure_langchain_logging,
     debug_enabled,
@@ -342,28 +350,50 @@ prompt = pull_prompt("hwchase17/structured-chat-agent")
 llm = qwen_model  # 换模型只改这一处；第一环与第二环共用，保证「采集」与「写码」口径一致
 
 
+# 从解析失败的错误文本里抠 JSON：structured chat 时代模型会把 action_input 包在
+# ```json 围栏里；function calling 时代的错误文本形如
+# "Could not parse tool input ... <原始 arguments 串>"。两种形态都先试围栏，
+# 再退化成「第一个 { 到最后一个 }」。
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.S)
+
+
+def _extract_json_blob(text: str) -> str:
+    """从一段错误文本里抠出那段 JSON；抠不到返回空串。"""
+    match = _JSON_FENCE_RE.search(text)
+    if match:
+        return match.group(1)
+    start, end = text.find("{"), text.rfind("}")
+    return text[start:end + 1] if 0 <= start < end else ""
+
+
 def _codegen_parsing_error(error: BaseException) -> str:
-    """第二环 Action Input 解析失败时回给模型的 Observation。
+    """第二环工具入参解析失败时回给模型的 Observation。
 
     只做「把错误说清楚 + 给出修好的样子」，不尝试替模型重放工具调用 ——
     解析失败发生在 langchain 内部，此时工具还没被执行，重放需要自己实现一遍
     agent 循环，得不偿失。把修复后的 JSON 直接摆在模型面前，它下一轮照抄即可，
     实测比只回一句「请输出合法 JSON」有效得多（后者经常连着几轮犯同一个错）。
+
+    修复实现统一走 src/utils/json_repair.repair_json_arguments（与 web 版同一份）。
+    早先这里调的是本模块私有的 _repair_illegal_tool_args：它从 `"code":` 后的引号只扫到
+    **第一个换行**，而 write_script 的 code 必然是多行，于是 `body.endswith('"')` 永远为
+    False、永远原样返回 —— 下面那句「已按规则修好的写法（可直接照抄）」**从来没出现过**，
+    模型每轮只收到一句空洞的「请输出合法 JSON」，连着几轮犯同一个错，
+    最后干脆改吐 Final Answer 收尾（脚本一个字都没落盘）。该函数已删除。
+
+    改用 function calling 之后这个回调命中的概率已经很低（坏转义在
+    repair_tool_call_arguments 那一层就被修掉了），留着是给「修不动」的形态兜底。
     """
     raw = str(getattr(error, "observation", "") or error)
-    repaired = _repair_illegal_tool_args(raw)
+    blob = _extract_json_blob(raw)
+    repaired = repair_json_arguments(blob) if blob else ""
     lines = [
-        """上一次 Action Input 不是合法 JSON，工具没有被执行（脚本尚未写盘）。
-        常见原因：字符串里嵌了未转义的双引号（如 assert \"省电\" in text）。
-        请重新输出同一次工具调用，并遵守：字符串内部的双引号写成 \\\"，换行写成 \\n，
-        不要出现裸控制字符。
-        """,
-        # "上一次 Action Input 不是合法 JSON，工具没有被执行（脚本尚未写盘）。",
-        # "常见原因：字符串里嵌了未转义的双引号（如 assert \"省电\" in text）。",
-        # "请重新输出同一次工具调用，并遵守：字符串内部的双引号写成 \\\"，换行写成 \\n，"
-        # "不要出现裸控制字符。",
+        "上一次工具入参不是合法 JSON，工具没有被执行（脚本尚未写盘）。",
+        "常见原因：字符串里嵌了未转义的双引号（如 assert \"省电\" in text），",
+        "或按 Python 习惯把单引号写成了 \\'（JSON 里没有这个转义）。",
+        "请重新发起同一次工具调用；多行代码用 \\n 表示换行，不要出现裸控制字符。",
     ]
-    if repaired != raw:
+    if repaired and repaired != blob:
         lines.append(f"已按规则修好的写法（可直接照抄）：{repaired[-1200:]}")
     return "\n".join(lines)
 
@@ -387,23 +417,51 @@ app_agent_executor = AgentExecutor(
     max_iterations=40,
 )
 
-# 第二环：代码生成 agent（用 function-calling 调 script_tools，不再靠模型手抄代码）。
+# 第二环：代码生成 agent —— **原生 function calling**（与 web 版同构；三个历史坑的完整
+# 记录见 src/utils/json_repair.py 的模块 docstring）。
+#
+# 早先这里是 create_structured_chat_agent(llm, script_tools, prompt)，即让模型把
+# action_input 以 JSON **文本**形式吐出来。write_script 的 code 参数是**整份多行 Python
+# 脚本**，等于要求模型手工把一整份代码转义成一个 JSON 字符串：
+#   `assert "系统打印服务" in page_text(driver)` 这种裸双引号实测必炸
+#   （JSONAgentOutputParser -> OutputParserException）。
+# 更糟的是炸完之后**没有任何显式失败**：模型重试几轮就改吐
+#   {"action": "Final Answer", "action_input": "脚本 xxx 不存在，将根据提供的测试步骤生成新的自动化测试脚本。"}
+# 这在 structured chat 协议里是**合法收尾**，AgentExecutor 打印 "> Finished chain."，
+# _invoke_codegen_agent 把这句话当成成功结论返回，main() 原样打印，
+# 直到最后 is_file() 才补一句「[警告] 脚本没有落盘」—— write_script 一次都没被调用，
+# 一整轮真机采集 + 十几次模型调用零产出。（「更多连接_打印1」就是这么废掉的。）
+#
+# 改成 bind_tools 之后：工具入参由模型侧按 JSON Schema 以结构化字段返回，多行代码不再
+# 需要模型自己转义；残留的坏转义 / 裸双引号由 repair_tool_call_arguments 在解析前修掉；
+# 「只宣告不落盘」这类失败则由 _invoke_codegen_agent 的落盘校验 + 定向重试兜住。
 # 这一环**可以执行脚本**（工具集里有 run_script），轮次需求与 web 版对齐：
 # 「已存在 -> read_script -> run_script -> 步骤失败则 write_script 修复 -> 再 run_script 确认」
 # 最多修 2 轮就是 6~8 个 action；新生成脚本的路径只需 2~3 个 action
 # （list_scripts -> write_script -> Final Answer，落盘即完成、不再执行）；
 # 20 轮足够跑完并留出模型跑偏的余量。
-codegen_prompt = pull_prompt("hwchase17/structured-chat-agent")
-codegen_agent = create_structured_chat_agent(llm, script_tools, codegen_prompt)
+# 第一环（app_agent）仍保留 structured chat：它的入参都是短字符串，且已验证可用。
+codegen_prompt = pull_prompt("hwchase17/openai-tools-agent")
+# 与 create_openai_tools_agent 等价的组装，只是在 llm 与解析器之间插了一步
+# repair_tool_call_arguments（历史坑 3）；官方工厂函数没有留解析器/中间步骤的注入点。
+codegen_agent = (
+    RunnablePassthrough.assign(
+        agent_scratchpad=lambda x: format_to_openai_tool_messages(x["intermediate_steps"]),
+    )
+    | codegen_prompt
+    | llm.bind(tools=[convert_to_openai_tool(tool) for tool in script_tools])
+    | RunnableLambda(repair_tool_call_arguments)
+    | OpenAIToolsAgentOutputParser()
+)
 codegen_agent_executor = AgentExecutor(
     agent=codegen_agent,
     tools=script_tools,
     verbose=DEBUG_LOGGING,       # 同上：控制台回调只走 invoke(config=...)
     return_intermediate_steps=True,
     max_iterations=20,
-    # 关键：qwen 偶尔会产出非法 JSON 的 Action Input（工具入参里嵌未转义的双引号），
-    # structured chat 默认直接抛 OutputParserException 终止整条 chain —— 此时脚本往往还没写盘，
-    # 一整轮采集 + 生成全部作废。改成把解析错误作为 Observation 喂回去，让模型自己重试。
+    # 入参解析失败时不要崩掉整条 chain，把错误变成 Observation 让模型自己重试。
+    # 注意：「模型没调 write_script 就 Final Answer」**不会**产生解析错误
+    # （那是合法的 AgentFinish），必须靠 _invoke_codegen_agent 的落盘校验兜住。
     handle_parsing_errors=_codegen_parsing_error,
 )
 
@@ -821,13 +879,13 @@ def describe_preconditions(refs: Sequence[PreconditionRef]) -> str:
             if ref.entry_name:
                 lines.append(f"- [前置用例] {ref.text} -> 复用 {ref.script_name} 的 {ref.entry_name}()")
             else:
-                lines.append(f"- [前置用例] {ref.text} -> 复用 {ref.script_name}"
-                             f"（暂未找到可复用入口，将按模板重构出入口后再 import）")
+                lines.append(f"""- [前置用例] {ref.text} -> 复用 {ref.script_name}\
+                  （暂未找到可复用入口，将按模板重构出入口后再 import）""")
         elif ref.is_inline:
             lines.append(f"- [自行实现] {ref.text} -> 在本用例脚本内导航/操作实现")
         else:
-            lines.append(f"- [未匹配] {ref.text} -> md 里找不到对应用例，"
-                         f"按字面意思实现（建议补 md 或改成泛指写法）")
+            lines.append(f"""- [未匹配] {ref.text} -> md 里找不到对应用例，\
+                按字面意思实现（建议补 md 或改成泛指写法）""")
     return "\n".join(lines)
 
 
@@ -975,9 +1033,9 @@ def build_query(case: Optional[TestCase], launch: AppLaunch,
     在 Appium 下必然失败，然后反复重试烧光 max_iterations。
     """
     if case is None:
-        steps_text = "（未指定测试用例：请先用 --testcase 选择，或直接在 md 里补充用例）"
+        steps_text = "\t\t（未指定测试用例：请先用 --testcase 选择，或直接在 md 里补充用例）"
     else:
-        steps_text = "\n".join(f"{index}. {step}" for index, step in enumerate(case.steps, 1))
+        steps_text = "\n".join(f"\t\t{index}. {step}" for index, step in enumerate(case.steps, 1))
     lines: list[str] = [
         f"""你是一个 app 自动化测试工程师，技术栈为 pytest + Appium（Android / UiAutomator2）。
         接下来请在**真机/模拟器上真实执行**下面这条测试用例，每一步都以上一步执行后的界面为准：
@@ -999,16 +1057,15 @@ def build_query(case: Optional[TestCase], launch: AppLaunch,
         tool = str(item.get("tool", ""))
         if tool == "# step":
             # 测试步骤原文不是工具调用，渲染成「工具调用样式」会让模型去找名为 step 的工具
-            lines.append(f"{index}. 【测试步骤】{item.get('input', '')}")
+            lines.append(f"\t\t{index}. 【测试步骤】{item.get('input', '')}")
         elif tool == "# precondition":
             # 标签里放**匹配到的用例名**（模型要照它做），原话跟在后面（里面常带账号等额外约束）
-            lines.append(f"{index}. 【前置用例：{item.get('case', '')}】"
+            lines.append(f"\t\t{index}. 【前置用例：{item.get('case', '')}】"
                          f"原话「{item.get('input', '')}」；{item.get('note', '')}")
         else:
-            lines.append(f"{index}. {tool}({json.dumps(item.get('input', {}), ensure_ascii=False)}){note}")
+            lines.append(f"\t\t{index}. {tool}({json.dumps(item.get('input', {}), ensure_ascii=False)}){note}")
     lines.extend([
         f"""
-        
         【测试步骤原文】
         {steps_text}
         
@@ -1252,17 +1309,17 @@ def preflight_appium() -> str:
         with urllib.request.urlopen(f"{server}/status", timeout=8) as response:
             payload = json.loads(response.read().decode("utf-8") or "{}")
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        return (f"Appium server（{server}）连不上：{exc}。"
-                "请先启动 server（appium -p 4723 --allow-cors），"
-                "或用 APPIUM_SERVER 指定正确地址后重跑。")
+        return f"""Appium server（{server}）连不上：{exc}。\
+            请先启动 server（appium -p 4723 --allow-cors），\
+            或用 APPIUM_SERVER 指定正确地址后重跑。"""
     if not payload.get("value", {}).get("ready", False):
         return (f"Appium server（{server}）回报未就绪："
                 f"{json.dumps(payload, ensure_ascii=False)[:300]}")
     devices = _adb_devices()
     if devices is not None and not devices:
-        return ("adb devices 没有列出任何处于 device 状态的设备。"
-                "请确认设备已连接并授权（unauthorized 需要在设备上点「允许 USB 调试」），"
-                "或用 APP_UDID 指定模拟器/设备序列号。")
+        return """adb devices 没有列出任何处于 device 状态的设备。\
+            请确认设备已连接并授权（unauthorized 需要在设备上点「允许 USB 调试」），\
+            或用 APP_UDID 指定模拟器/设备序列号。"""
     return ""
 
 
@@ -1394,36 +1451,10 @@ def app_execute_result(_inputs: dict) -> str:
 # ---------------------------------------------------------------------------
 # 第二环：把真实轨迹落成 pytest 脚本
 # ---------------------------------------------------------------------------
-def _repair_illegal_tool_args(text: str) -> str:
-    """修复 qwen 在 Action Input 里产出的非法 JSON（字符串内嵌裸双引号）。
-
-    实测高频形态：write_script 的 code 入参里，Python 代码含 `assert "x" in text`，
-    模型忘了把内层双引号转义，于是整段 Action Input 变成非法 JSON。
-    handle_parsing_errors 只能让模型重试，而它往往连着几轮犯同一个错，白白耗尽
-    max_iterations（脚本一个字都没写盘）。这里先做一次确定性修复：
-    找到 `"code": "` 之后到该行末尾 `"` 之前的内容，把内部裸双引号补上反斜杠。
-    修不动就原样返回，交给 handle_parsing_errors 兜底。
-    """
-    marker = '"code":'
-    start = text.find(marker)
-    if start < 0:
-        return text
-    quote = text.find('"', start + len(marker))
-    while quote >= 0 and text[quote + 1:quote + 2] in (" ", "\n", "\t"):
-        quote = text.find('"', quote + 1)
-    if quote < 0:
-        return text
-    end = text.find('\n', quote)
-    if end < 0:
-        end = len(text)
-    body = text[quote + 1:end].rstrip()
-    if not body.endswith('"'):
-        return text
-    inner = body[:-1]
-    fixed = re.sub(r'(?<!\\)"', r'\\"', inner)
-    if fixed == inner:
-        return text
-    return text[:quote + 1] + fixed + '"' + text[end:]
+# 这里曾有一个模块私有的 _repair_illegal_tool_args：从 `"code":` 后的引号只扫到
+# **第一个换行**，而 write_script 的 code 必然是多行 —— 实测它对任何真实载荷都原样返回，
+# 等于兜底形同虚设（详见 _codegen_parsing_error 的 docstring）。
+# 入参 JSON 的机械修复已统一到 src/utils/json_repair.py，web / app 共用同一份实现。
 
 
 APP_FIXTURE_DOC = """# driver fixture 必须这样写（Appium / Android）：
@@ -1548,6 +1579,11 @@ CODEGEN_TASK = """你是一个 app 自动化测试工程师，技术栈为 pytes
     {code_rules}
     {assert_rules}
     {entry_doc}
+    **硬性要求（违反即判定本轮失败）**：没有真正调用过工具之前，禁止给出 Final Answer ——
+    「脚本 xxx 不存在，将根据提供的测试步骤生成新的自动化测试脚本」这类**只宣告意图**的回复
+    不会让任何文件落盘，本轮真机采集与全部模型调用直接作废，系统会据此判失败并让你重来。
+    新生成脚本的路径必须以一次真实的 write_script 调用结束；
+    复核既有脚本的路径必须以一次真实的 run_script 调用结束。
     必须严格按以下流程使用工具，不要臆测文件是否存在：
     1. 先调用 list_scripts，确认 {script_name} 是否已经存在；
     2. 已存在（上一轮生成过，本轮命中步骤缓存）：调用 read_script 读取内容，与上面的步骤 json
@@ -1707,6 +1743,58 @@ def codegen_prompt_inputs(case: Optional[TestCase], launch: AppLaunch,
     }
 
 
+# 第二环「没落盘」时的总尝试轮数（含首轮）：3 = 首轮 + 2 次重试。
+# 为什么不无限重试：这类失败的成因是模型行为（只宣告不调工具），换一句更硬的指令通常
+# 一次就能纠正；连续 3 轮都不肯调 write_script，说明是 prompt / 模型层面的问题，
+# 再烧下去只是浪费调用额度，不如把明确结论交给开发者。
+CODEGEN_MAX_ATTEMPTS = 3
+
+
+def _called_tool_names(result: Mapping[str, Any]) -> list[str]:
+    """从 AgentExecutor 的返回里取出本轮真正调用过的工具名（按调用顺序）。
+
+    return_intermediate_steps=True 一直开着，但这份轨迹早先从来没被读过 ——
+    「模型到底有没有调 write_script」这个最关键的问题，只能靠开发者自己翻 tracer 日志。
+    """
+    names: list[str] = []
+    for item in result.get("intermediate_steps") or []:
+        # 正常形态是 (AgentAction, observation) 二元组；也容忍「只放了 action 对象」
+        # 或 AgentActionMessageLog（.action 才是动作）这类变形，诊断代码不该自己先崩。
+        if isinstance(item, (tuple, list)):
+            action = item[0] if item else None
+        else:
+            action = getattr(item, "action", None) or item
+        name = str(getattr(action, "tool", "") or "")
+        if name:
+            names.append(name)
+    return names
+
+
+def codegen_retry_hint(target: Path, called_tools: Sequence[str], attempt: int) -> str:
+    """第二环收尾却没落盘时，追加到任务描述后面的硬指令（纯函数，便于单测）。"""
+    called = "、".join(dict.fromkeys(called_tools)) or "一个工具都没调用"
+    return f"""【第 {attempt} 次重试：上一轮任务没有完成】
+    上一轮你调用了 {called}，但**没有调用 write_script**，{target.name} 至今不存在；
+    你给出的 Final Answer 只是「将要生成脚本」的宣告 —— 这不算完成任务，本轮产出为零。
+    现在**立刻**调用 write_script(file_name="{target.name}", code=<完整脚本代码>) 把脚本写盘：
+      - 不要再输出计划、解释或前言，第一个动作就必须是 write_script；
+      - 不要再调用 list_scripts / read_script（{target.name} 已确认不存在）；
+      - code 必须是可直接运行的完整脚本（含 fixture 与全部测试步骤），不许省略、不许用注释占位；
+      - 落盘之后再给 Final Answer。"""
+
+
+def codegen_failure_message(target: Path, attempts: int, answer: str,
+                            called_tools: Sequence[str]) -> str:
+    """重试用尽仍没落盘时返回的结论（明确失败，不再把模型的宣告当成功）。"""
+    called = "、".join(dict.fromkeys(called_tools)) or "一个工具都没调用"
+    return f"""脚本生成失败：第二环连续 {attempts} 轮都没有调用 write_script，{target} 没有落盘。
+    这几轮实际调用过的工具：{called}
+    模型最后一轮的 Final Answer：{_short(answer, 300)}
+    这类失败的成因是模型「只宣告不落盘」，不是脚本内容问题，重跑同一条命令通常就能恢复：
+      python src/app/generate_autoapp.py --testcase "<用例名>" --debug-events=all 2>&1 | tee /tmp/app_run.log
+    第一环采集到的步骤已缓存在 {STEPS_CACHE_DIR}，重跑不会重新连真机。"""
+
+
 def _invoke_codegen_agent(prompt_value: Any) -> str:
     """调用第二环 agent 并返回 Final Answer；第一环产出不合格时直接短路。
 
@@ -1717,19 +1805,50 @@ def _invoke_codegen_agent(prompt_value: Any) -> str:
     这里显式传 callbacks（控制台调试回调）：AgentExecutor.invoke 不会自动继承外层 chain
     的 config，不传的话第二环的工具调用一行 tracer 日志都不打，
     而「脚本为什么写成这样」恰恰只能从那段轨迹里看出来。
+
+    **落盘校验 + 定向重试**（本函数的另一半职责）：
+    「模型没调 write_script 就给出 Final Answer」在 agent 协议里是**合法收尾** ——
+    不抛异常、不触发 handle_parsing_errors，AgentExecutor 还会照常打印 "> Finished chain."。
+    早先这种情况被原样当成成功结论返回，一路到 main() 末尾才由 is_file() 补一句 [警告]
+    （用例「更多连接_打印1」就是这么废掉一整轮的：真机采集成功、9 步全绿，
+    第二环只回了一句「脚本不存在，将根据提供的测试步骤生成新的自动化测试脚本。」）。
+    所以这里把「脚本是否真的落盘」当成第二环的成功判据：没落盘就带着更硬的指令重试，
+    重试用尽仍没落盘则返回明确失败，让 main() 以非 0 退出码收场。
     """
     if CODEGEN_SKIP_REASON:
         print(CODEGEN_SKIP_REASON)
         return CODEGEN_SKIP_REASON
-    text = prompt_value.to_string() if hasattr(prompt_value, "to_string") else str(prompt_value)
-    try:
-        result = codegen_agent_executor.invoke(
-            {"input": text}, config={"callbacks": list(DEBUG_CALLBACKS)})
-    except Exception as exc:  # noqa: BLE001 - 第二环异常不能让整条 chain 以 traceback 收尾
-        message = f"{type(exc).__name__}: {str(exc).splitlines()[0] if str(exc) else ''}"
-        logging.getLogger("app.codegen").exception("代码生成 agent 执行异常：%s", message)
-        return f"脚本生成失败：{message}（加 --debug-events=all 重跑可看到完整工具轨迹）"
-    return str(result.get("output", ""))
+    base_text = (prompt_value.to_string() if hasattr(prompt_value, "to_string")
+                 else str(prompt_value))
+    log = logging.getLogger("app.codegen")
+    target = SCRIPTS_DIR / script_name_of_case(CURRENT_CASE)
+    # 本轮之前就存在 = 这一轮的任务是**复核**既有脚本（CODEGEN_TASK 第 2 条），
+    # 不要求 write_script 落盘；只有「本轮要新生成」时才把落盘当成硬性成功条件。
+    existed_before = target.is_file()
+    text = base_text
+    called_tools: list[str] = []
+    answer = ""
+    for attempt in range(1, CODEGEN_MAX_ATTEMPTS + 1):
+        try:
+            result = codegen_agent_executor.invoke(
+                {"input": text}, config={"callbacks": list(DEBUG_CALLBACKS)})
+        except Exception as exc:  # noqa: BLE001 - 第二环异常不能让整条 chain 以 traceback 收尾
+            message = f"{type(exc).__name__}: {str(exc).splitlines()[0] if str(exc) else ''}"
+            log.exception("代码生成 agent 执行异常：%s", message)
+            return f"脚本生成失败：{message}（加 --debug-events=all 重跑可看到完整工具轨迹）"
+        answer = str(result.get("output", ""))
+        called_tools = _called_tool_names(result)
+        if existed_before or target.is_file():
+            if attempt > 1:
+                log.info("第 %d 轮重试后脚本已落盘：%s", attempt, target)
+            return answer
+        log.warning("第二环正常收尾但 %s 没有落盘（本轮调用过的工具：%s；Final Answer：%s）",
+                    target.name, "、".join(dict.fromkeys(called_tools)) or "一个都没调",
+                    _short(answer, 300))
+        if attempt < CODEGEN_MAX_ATTEMPTS:
+            # 每轮都从 base_text 重新拼，避免重试指令层层叠加把 prompt 越撑越长
+            text = f"{base_text}\n\n{codegen_retry_hint(target, called_tools, attempt)}"
+    return codegen_failure_message(target, CODEGEN_MAX_ATTEMPTS, answer, called_tools)
 
 
 # ---------------------------------------------------------------------------
@@ -1757,7 +1876,8 @@ def _codegen_prompt_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 # 把第一环产出的 {steps}（真机步骤 json）与 run_case_chain 传入的 {task}（codegen_input(case)）
-# 一起填进 CODEGEN_TASK，交给 codegen agent（structured chat + script_tools）
+# 一起填进 CODEGEN_TASK，交给 codegen agent（原生 function calling + script_tools，
+# 装配见「第二环：代码生成 agent」处的说明）
 # 读脚本 / 写脚本 —— 注意它**不跑脚本**。
 #
 # 为什么第二环是 agent 而不是「llm | StrOutputParser」：
@@ -1998,8 +2118,8 @@ def list_cases(all_cases: Sequence[TestCase]) -> None:
             print(f"       - {step}")
         if case.expected:
             print(f"       预期：{'；'.join(case.expected)}")
-    print('\n用法：python src/app/generate_autoapp.py --testcase "<用例名>"'
-          "   # 不带参数则跑文档里的全部用例")
+    print("""用法：python src/app/generate_autoapp.py --testcase "<用例名>"\
+        # 不带参数则跑文档里的全部用例""")
 
 
 def _select_targets(all_cases: Sequence[TestCase]) -> tuple[list[Optional[TestCase]], int]:
@@ -2214,14 +2334,25 @@ def main() -> int:
             logging.getLogger("app.run").exception(
                 "用例 %s 运行失败：%s", case.name if case else "(未指定)", exc)
             continue
+        script_path = SCRIPTS_DIR / script_name_of_case(case)
         print("\n" + "=" * 70)
         print(f"用例：{case.name if case else '(未指定)'}")
-        print(f"脚本：{SCRIPTS_DIR / script_name_of_case(case)}")
+        print(f"脚本：{script_path}")
         print("=" * 70)
         print(answer or "(第二环没有返回内容)")
-        if not (SCRIPTS_DIR / script_name_of_case(case)).is_file():
+        if not script_path.is_file():
             failures += 1
-            print(f"\n[警告] 脚本没有落盘：{SCRIPTS_DIR / script_name_of_case(case)}",
+            # 走到这里说明第二环已经连续 CODEGEN_MAX_ATTEMPTS 轮「只宣告不落盘」
+            # （落盘校验 + 定向重试都在 _invoke_codegen_agent 里做完了）。
+            # 告警必须带上「重跑代价很低」这个事实：第一环的步骤已缓存，重跑不连真机 ——
+            # 早先只有一句「[警告] 脚本没有落盘」，开发者会以为要重新插设备跑一整轮。
+            print(f"""
+[错误] 脚本没有落盘：{script_path}
+       第二环 agent 收尾时没有真正调用 write_script —— 上面那段 Final Answer 只是模型的自述，
+       不代表脚本已生成（已连续 {CODEGEN_MAX_ATTEMPTS} 轮没有落盘）。
+       第一环采集到的步骤已缓存在 {steps_cache_path(case)}，直接重跑同一条命令即可复用，
+       不会再连真机；要看第二环究竟调了哪些工具，加 --debug-events=all 并接 tee 留档：
+       python src/app/generate_autoapp.py --testcase "{case.name if case else ''}" --debug-events=all 2>&1 | tee /tmp/app_run.log""",
                   file=sys.stderr)
     return 1 if failures else 0
 

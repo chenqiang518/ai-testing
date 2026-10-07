@@ -52,13 +52,11 @@ app = AppiumWeb()
 # 定位失败时追加的提示。与 generate_autoapp.step_failure_reason() 里的切分标记
 # （"。请先调用 get_page_source"）配套：那一段会被剥掉再写进步骤缓存的 failed 原因，
 # 改这里的文案必须同步改那边，否则缓存里的失败原因会带上这段冗长提示。
-_RETRY_HINT = (
-    "。请先调用 get_page_source 获取当前界面的控件层级摘要，"
-    "再从摘要里挑真实存在的 text / resource-id / content-desc 拼定位表达式"
-    "（Appium 不支持 css 选择器，也不接受只给一段可见文本）；"
-    "若摘要里没有目标文本，说明它还没滚进可视区，先用 scroll_to_element 滚动查找。"
-    "禁止原样重试同一个定位表达式。"
-)
+_RETRY_HINT = """。请先调用 get_page_source 获取当前界面的控件层级摘要，\
+    再从摘要里挑真实存在的 text / resource-id / content-desc 拼定位表达式\
+    （Appium 不支持 css 选择器，也不接受只给一段可见文本）；\
+    若摘要里没有目标文本，说明它还没滚进可视区，先用 scroll_to_element 滚动查找。\
+    禁止原样重试同一个定位表达式。"""
 
 # Appium/Selenium 抛出的异常里，真正值得回给模型的部分通常就在前一两行；
 # 完整消息动辄几十行（含 urllib3 / appium client 内部帧），只会挤占上下文。
@@ -293,18 +291,16 @@ WORDING_REJECTION_PREFIX = "已拒绝执行"
 # 拒绝执行时回给模型的 Observation。措辞刻意写成「唯一正确处置」而不是「建议」：
 # 实测模型面对开放式建议时会继续换文案试探，只有把「判定失败 + quit」写成明确的
 # 收尾动作，它才会停下来。
-_WORDING_REJECTION = WORDING_REJECTION_PREFIX + (
-    " {label}：定位/断言文案 {offenders} 不在本条测试用例的原文里。"
-    "界面文案只能**逐字**取自测试步骤原文，禁止改写成界面上看起来相近的入口"
-    "（原文写「更多连接」就只能用「更多连接」，不得换成「更多设置」，"
-    "也不得改点「连接与共享」这类别的入口）—— 那不是同一条用例，跑通了也是错的。"
-    "唯一正确处置：1) get_page_source 核对当前界面；"
-    "2) 目标文案不在可视区就用 scroll_to_element 继续找**原文文案**（max_swipes 可给到 10）；"
-    "3) 滚完仍找不到，说明该机型/被测版本上没有这个入口 —— 判定本步骤失败，"
-    "停止后续步骤，直接调用 quit 释放设备，并在 Final Answer 里写明"
-    "「界面缺少用例原文文案『X』，当前界面上最接近的是『Y』，疑似 app 版本/机型不匹配，"
-    "需人工确认用例或换机型」。不要为了让流程跑下去而替换文案。"
-)
+_WORDING_REJECTION = WORDING_REJECTION_PREFIX + """ {label}：定位/断言文案 {offenders} 不在本条测试用例的原文里。\
+    界面文案只能**逐字**取自测试步骤原文，禁止改写成界面上看起来相近的入口\
+    （原文写「更多连接」就只能用「更多连接」，不得换成「更多设置」，\
+    也不得改点「连接与共享」这类别的入口）—— 那不是同一条用例，跑通了也是错的。\
+    唯一正确处置：1) get_page_source 核对当前界面；\
+    2) 目标文案不在可视区就用 scroll_to_element 继续找**原文文案**（max_swipes 可给到 10）；\
+    3) 滚完仍找不到，说明该机型/被测版本上没有这个入口 —— 判定本步骤失败，\
+    停止后续步骤，直接调用 quit 释放设备，并在 Final Answer 里写明\
+    「界面缺少用例原文文案『X』，当前界面上最接近的是『Y』，疑似 app 版本/机型不匹配，\
+    需人工确认用例或换机型」。不要为了让流程跑下去而替换文案。"""
 
 
 def _wording_rejection(label: str, *, locators: Sequence[Any] = (),

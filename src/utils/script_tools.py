@@ -198,20 +198,16 @@ WEB_TARGET = ScriptTarget(
         "chromedriver",
         "session not created",
     ),
-    fix_hint=(
-        "web 领域常见脚本问题：\n"
-        "- 启动浏览器必须用 webdriver.Chrome(service=Service(resolve_chromedriver()))，"
-        "禁止 executable_path=（Selenium 4 已移除该参数，会直接 TypeError）；\n"
-        "- 定位不到元素 / 等待超时：先检查是否漏了显式等待（WebDriverWait + "
-        "expected_conditions），以及 css 选择器是否被改写（必须原样使用采集到的选择器）；\n"
-        "- 点击没反应：点击前要用 EC.element_to_be_clickable，仅用 "
-        "presence_of_element_located 会在 Vue 绑定事件前点到，表单不会真正提交。"
-    ),
-    assert_hint=(
-        "- 断言「多个元素里包含某些文本」时必须用 find_elements（复数）取全部匹配元素后聚合文本，"
-        "用 find_element（单数）只会拿到第一个，典型症状是 assert '商场管理' in '首页'；\n"
-        "- SPA 异步渲染：断言前要先等目标元素/文本真正渲染出来，取太早会拿到空串。"
-    ),
+    fix_hint="""web 领域常见脚本问题：
+    - 启动浏览器必须用 webdriver.Chrome(service=Service(resolve_chromedriver()))，\
+    禁止 executable_path=（Selenium 4 已移除该参数，会直接 TypeError）；
+    - 定位不到元素 / 等待超时：先检查是否漏了显式等待（WebDriverWait + \
+    expected_conditions），以及 css 选择器是否被改写（必须原样使用采集到的选择器）；
+    - 点击没反应：点击前要用 EC.element_to_be_clickable，仅用 \
+    presence_of_element_located 会在 Vue 绑定事件前点到，表单不会真正提交。""",
+    assert_hint="""- 断言「多个元素里包含某些文本」时必须用 find_elements（复数）取全部匹配元素后聚合文本，\
+    用 find_element（单数）只会拿到第一个，典型症状是 assert '商场管理' in '首页'；
+    - SPA 异步渲染：断言前要先等目标元素/文本真正渲染出来，取太早会拿到空串。""",
     timeout=180,
 )
 
@@ -236,18 +232,14 @@ API_TARGET = ScriptTarget(
         "Max retries exceeded",
         "Failed to establish a new connection",
     ),
-    fix_hint=(
-        "api 领域常见脚本问题：\n"
-        "- 连接类错误先确认 url 带协议头（https://）、被测服务可达、requests 传了 timeout=；\n"
-        "- response.json() 之前要先确认状态码与 content-type，否则会把「服务返回 HTML 错误页」"
-        "误判成断言失败（JSONDecodeError 属于脚本步骤问题，需要修脚本）；\n"
-        "- 需要鉴权的接口先取 token 再放进 header/cookie，不要硬编码过期凭证；\n"
-        "- 用例之间共享数据请用 fixture / parametrize，不要依赖执行顺序。"
-    ),
-    assert_hint=(
-        "- 断言响应体字段时确认取值路径正确（如 resp.json()['data']['list'] 而不是只取第一个元素）；\n"
-        "- 断言列表/集合类结果时要聚合全部条目再判断，只看 [0] 会漏判。"
-    ),
+    fix_hint="""api 领域常见脚本问题：
+    - 连接类错误先确认 url 带协议头（https://）、被测服务可达、requests 传了 timeout=；
+    - response.json() 之前要先确认状态码与 content-type，否则会把「服务返回 HTML 错误页」\
+    误判成断言失败（JSONDecodeError 属于脚本步骤问题，需要修脚本）；
+    - 需要鉴权的接口先取 token 再放进 header/cookie，不要硬编码过期凭证；
+    - 用例之间共享数据请用 fixture / parametrize，不要依赖执行顺序。""",
+    assert_hint="""- 断言响应体字段时确认取值路径正确（如 resp.json()['data']['list'] 而不是只取第一个元素）；
+    - 断言列表/集合类结果时要聚合全部条目再判断，只看 [0] 会漏判。""",
     timeout=120,
 )
 
@@ -269,20 +261,16 @@ APP_TARGET = ScriptTarget(
         "uiautomator2",
         "xcodebuild",
     ),
-    fix_hint=(
-        "app 领域常见脚本问题：\n"
-        "- 「Could not start a new session / Connection refused」属于环境问题：appium server "
-        "未启动（默认 http://127.0.0.1:4723）或设备/模拟器不在线（adb devices 检查），"
-        "这类原因连续失败两次应停止修复并在 Final Answer 中说明；\n"
-        "- capabilities 要与真机一致（platformName / automationName / appPackage / "
-        "appActivity / udid）；\n"
-        "- 定位要用 AppiumBy（accessibility_id、android.widget.* 等），不要照搬 web 的 css "
-        "选择器；driver.quit() 必须放在 fixture 的 yield 之后，否则 session 泄漏。"
-    ),
-    assert_hint=(
-        "- 断言控件文本前先等控件真正出现（WebDriverWait + presence_of_element_located）；\n"
-        "- 列表类断言要 find_elements 取全部控件后聚合 text，只取第一个会漏判。"
-    ),
+    fix_hint="""app 领域常见脚本问题：
+    - 「Could not start a new session / Connection refused」属于环境问题：appium server \
+    未启动（默认 http://127.0.0.1:4723）或设备/模拟器不在线（adb devices 检查），\
+    这类原因连续失败两次应停止修复并在 Final Answer 中说明；
+    - capabilities 要与真机一致（platformName / automationName / appPackage / \
+    appActivity / udid）；
+    - 定位要用 AppiumBy（accessibility_id、android.widget.* 等），不要照搬 web 的 css \
+    选择器；driver.quit() 必须放在 fixture 的 yield 之后，否则 session 泄漏。""",
+    assert_hint="""- 断言控件文本前先等控件真正出现（WebDriverWait + presence_of_element_located）；
+    - 列表类断言要 find_elements 取全部控件后聚合 text，只取第一个会漏判。""",
     # 真机执行比浏览器慢一个量级：create_driver 起 UiAutomator2 session 要十几到几十秒，
     # 长列表还要反复 scroll_to，因此把超时放宽到 600s —— 判早了会把**本来正确**的脚本
     # 误报成「执行超时」，反而诱导 agent 去改一份没问题的脚本。
@@ -343,9 +331,9 @@ def resolve_target(target: Union[str, ScriptTarget, None]) -> ScriptTarget:
         raise ValueError(f"target 不能为空，可选领域：{_target_choices()}")
     key = _ALIASES.get(name)
     if key is None:
-        raise ValueError(f"未知的脚本领域：{target}，可选领域：{_target_choices()}，"
-                         f"也可用技术栈别名（selenium/requests/appium），"
-                         f"或调用 list_targets 查看目录与技术栈")
+        raise ValueError(f"""未知的脚本领域：{target}，可选领域：{_target_choices()}，\
+        也可用技术栈别名（selenium/requests/appium），\
+        或调用 list_targets 查看目录与技术栈""")
     return TARGETS[key]
 
 
@@ -365,24 +353,20 @@ SCRIPTS_DIR = WEB_TARGET.dir
 
 # 执行失败时给 agent 的通用纠错提示：区分「脚本步骤失败」与「断言失败」，
 # 只有前者才需要修脚本（断言失败说明脚本本身跑得通，属于被测系统/用例预期问题）。
-_FIX_HINT_BASE = (
-    "请判断失败类型后决定下一步：\n"
-    "- 脚本步骤失败（定位不到元素 / 会话或请求建立失败 / 等待超时 / 选择器或字段写错 / "
-    "导入错误 / 语法错误）：先调用 read_script 读取当前脚本，再用 write_script 写入"
-    "修复后的**完整**代码，然后重新 run_script 确认（最多修复 2 轮）；\n"
-    "- 断言失败（assert 不成立）：脚本本身能跑通，**不要**修改脚本，"
-    "直接在 Final Answer 中说明断言结果。"
-)
+_FIX_HINT_BASE = """请判断失败类型后决定下一步：
+- 脚本步骤失败（定位不到元素 / 会话或请求建立失败 / 等待超时 / 选择器或字段写错 / \
+导入错误 / 语法错误）：先调用 read_script 读取当前脚本，再用 write_script 写入\
+修复后的**完整**代码，然后重新 run_script 确认（最多修复 2 轮）；
+- 断言失败（assert 不成立）：脚本本身能跑通，**不要**修改脚本，\
+直接在 Final Answer 中说明断言结果。"""
 
 # 断言失败的通用提示：实测最常见的「假断言失败」其实是脚本取值方式写错
 # （只取第一个匹配项 / 等待不足导致取到空值），必须让 agent 先自查再下结论，
 # 否则会把脚本缺陷误报成被测系统的问题。领域专属自查项由 target.assert_hint 补充。
-_ASSERT_HINT_BASE = (
-    "断言失败。先自查是不是脚本自身的取值方式问题（这类必须修脚本，最多修复 2 轮）：\n"
-    "{extra}\n"
-    "确认脚本取值方式无误后，才把它当作被测系统的真实断言结果，此时**不要**改脚本，"
-    "直接在 Final Answer 中说明。"
-)
+_ASSERT_HINT_BASE = """断言失败。先自查是不是脚本自身的取值方式问题（这类必须修脚本，最多修复 2 轮）：
+{extra}
+确认脚本取值方式无误后，才把它当作被测系统的真实断言结果，此时**不要**改脚本，\
+直接在 Final Answer 中说明。"""
 _DEFAULT_ASSERT_EXTRA = "- 取值路径 / 等待时机是否正确，是否取到了空值或只取了第一个匹配项；"
 
 
@@ -556,8 +540,8 @@ def _fstring_hint(code: str) -> str:
         return ""
     if 'f"' not in code and "f'" not in code:
         return ""
-    return ("注意：f-string 中出现了 {{...}}，运行时会原样输出花括号而不是变量值；"
-            "若不是刻意输出字面花括号，请改成单花括号后重新写入。")
+    return """注意：f-string 中出现了 {{...}}，运行时会原样输出花括号而不是变量值；\
+    若不是刻意输出字面花括号，请改成单花括号后重新写入。"""
 
 
 def _ensure_package(target: ScriptTarget) -> Path:
@@ -627,8 +611,8 @@ def _list_scripts(target: ScriptTarget) -> str:
     scripts_dir = _ensure_package(target)
     names = sorted(p.name for p in scripts_dir.glob("*.py") if p.name != "__init__.py")
     if not names:
-        return (f"{target.title}（{target.stack}）脚本目录 {scripts_dir} 下暂无自动化脚本，"
-                f"需要用 write_script 生成")
+        return f"""{target.title}（{target.stack}）脚本目录 {scripts_dir} 下暂无自动化脚本，\
+        需要用 write_script 生成"""
     return f"{scripts_dir} 下已有的脚本：{', '.join(names)}"
 
 
@@ -636,8 +620,8 @@ def _read_script(target: ScriptTarget, file_name: str) -> str:
     """读取脚本内容（超长截断），供 agent 在修复前查看现状。"""
     path = _resolve_script_path(target, file_name)
     if not path.is_file():
-        return (f"脚本不存在：{path}。"
-                f"可先用 list_scripts 查看已有脚本，或用 write_script 生成新脚本")
+        return f"""脚本不存在：{path}。\
+        可先用 list_scripts 查看已有脚本，或用 write_script 生成新脚本"""
     text = path.read_text(encoding="utf-8")
     total = len(text)
     if total > MAX_READ_LENGTH:
@@ -674,8 +658,8 @@ def _write_script(target: ScriptTarget, file_name: str, code: str) -> str:
         compile(cleaned, str(path), "exec")
     except SyntaxError as exc:
         raise ValueError(
-            f"代码语法检查未通过（第 {exc.lineno} 行）：{exc.msg}。"
-            f"请只输出完整可运行的 Python 代码（不要 markdown 围栏、不要解释文字）后重试"
+            f"""代码语法检查未通过（第 {exc.lineno} 行）：{exc.msg}。\
+            请只输出完整可运行的 Python 代码（不要 markdown 围栏、不要解释文字）后重试"""
         ) from exc
 
     undefined = _undefined_names(cleaned)
@@ -683,20 +667,20 @@ def _write_script(target: ScriptTarget, file_name: str, code: str) -> str:
         detail = "；".join(f"第 {line} 行的 {name}" for line, name in undefined[:5])
         more = f"（另有 {len(undefined) - 5} 处）" if len(undefined) > 5 else ""
         raise ValueError(
-            f"代码里用到了从未导入 / 从未定义的名字：{detail}{more}。"
-            f"语法检查查不出这种问题，但脚本一执行就会 NameError。"
-            f"请补齐 import（例如用了 re.search 就要 import re、用了 sleep 就要 "
-            f"from time import sleep），或改用已导入的名字，然后重新 write_script"
+            f"""代码里用到了从未导入 / 从未定义的名字：{detail}{more}。\
+            语法检查查不出这种问题，但脚本一执行就会 NameError。\
+            请补齐 import（例如用了 re.search 就要 import re、用了 sleep 就要 \
+            from time import sleep），或改用已导入的名字，然后重新 write_script"""
         )
 
     path.write_text(cleaned, encoding="utf-8")
     # 模型给的路径常被归一化（如 ./scripts/x.py -> x.py），必须把真实落点回告，
     # 否则 agent 会在 Final Answer 里报错一个不存在的路径
     normalized = "" if path.name == (file_name or "").strip() else f"（入参已归一化为 {path.name}）"
-    return (f"脚本已保存：{path}{normalized}{redirected}（{len(cleaned.splitlines())} 行，"
-            f"{len(cleaned)} 字符）。{_fstring_hint(cleaned)}"
-            f"语法检查已通过。本工具**只落盘、不执行**，"
-            f"{_verify_hint(target)}")
+    return f"""脚本已保存：{path}{normalized}{redirected}（{len(cleaned.splitlines())} 行，\
+        {len(cleaned)} 字符）。{_fstring_hint(cleaned)}\
+        语法检查已通过。本工具**只落盘、不执行**，\
+        {_verify_hint(target)}"""
 
 
 def _verify_hint(target: ScriptTarget) -> str:
@@ -709,16 +693,16 @@ def _verify_hint(target: ScriptTarget) -> str:
         执行步骤失败就修复到跑通）」「确认修复」两种用途。
     """
     if not target.expose_run_script:
-        return (f"{target.key} 领域**不提供 run_script 工具**，落盘即完成，任何情况下都不要"
-                "试图执行脚本：本轮步骤已在真实设备上完整跑通过一遍（含断言），再跑一次等于"
-                "把同一条用例重复执行（多起一次 Appium session、多占设备几十秒）。"
-                "确实需要人工确认时，由开发者自己执行 "
-                f"`python -m pytest {target.scripts_dir}/<脚本名>`。")
-    return ("新生成的脚本也**不需要**再调用 run_script 重复验证 —— 本轮步骤已在真实环境里"
-            "完整跑通过一遍，再跑一次等于把同一条用例重复执行（多登录一次被测站点 / "
-            "多起一次 Appium session）。"
-            "只有「脚本原本就存在、本轮没有重新采集步骤」或「你刚用 write_script 修复过脚本」"
-            "这两种情况，才需要调用 run_script 验证。")
+        return f"""{target.key} 领域**不提供 run_script 工具**，落盘即完成，任何情况下都不要\
+            试图执行脚本：本轮步骤已在真实设备上完整跑通过一遍（含断言），再跑一次等于\
+            把同一条用例重复执行（多起一次 Appium session、多占设备几十秒）。\
+            确实需要人工确认时，由开发者自己执行 \
+            `python -m pytest {target.scripts_dir}/<脚本名>`。"""
+    return """新生成的脚本也**不需要**再调用 run_script 重复验证 —— 本轮步骤已在真实环境里\
+        完整跑通过一遍，再跑一次等于把同一条用例重复执行（多登录一次被测站点 / \
+        多起一次 Appium session）。\
+        只有「脚本原本就存在、本轮没有重新采集步骤」或「你刚用 write_script 修复过脚本」\
+        这两种情况，才需要调用 run_script 验证。"""
 
 
 def _is_assertion_failure(target: ScriptTarget, output: str) -> bool:
@@ -767,11 +751,11 @@ def _run_script(target: ScriptTarget, file_name: str) -> str:
     """
     path = _resolve_script_path(target, file_name)
     if not target.expose_run_script:
-        return (f"{target.title}（{target.key}）领域不提供脚本执行能力，已跳过执行："
-                f"{path}。\n本轮步骤已在真实设备上完整跑通过一遍（含断言），再执行一次等于把"
-                f"同一条用例重复跑一遍（多起一次 session、多占设备几十秒），因此第二环"
-                f"**任何情况下都不执行脚本**，write_script 落盘即完成。\n"
-                f"确实需要人工确认时，请自己执行：{sys.executable} -m pytest {path}")
+        return f"""{target.title}（{target.key}）领域不提供脚本执行能力，已跳过执行：{path}。
+            本轮步骤已在真实设备上完整跑通过一遍（含断言），再执行一次等于把\
+            同一条用例重复跑一遍（多起一次 session、多占设备几十秒），因此第二环\
+            **任何情况下都不执行脚本**，write_script 落盘即完成。
+            确实需要人工确认时，请自己执行：{sys.executable} -m pytest {path}"""
     if not path.is_file():
         return f"脚本不存在：{path}，无法执行。请先用 write_script 生成"
 
@@ -781,10 +765,10 @@ def _run_script(target: ScriptTarget, file_name: str) -> str:
             capture_output=True, text=True, timeout=target.timeout,
         )
     except subprocess.TimeoutExpired:
-        return (f"执行超时（超过 {target.timeout} 秒）：{path}\n"
-                f"多为等待/重试一直挂着、或 driver/session 未正常释放导致，请检查显式等待的"
-                f"超时时间与资源释放（如 driver.quit() 放在 fixture 的 yield 之后）。\n"
-                f"{_fix_hint(target)}")
+        return f"""执行超时（超过 {target.timeout} 秒）：{path}
+            多为等待/重试一直挂着、或 driver/session 未正常释放导致，请检查显式等待的\
+            超时时间与资源释放（如 driver.quit() 放在 fixture 的 yield 之后）。
+            {_fix_hint(target)}"""
 
     output = f"{proc.stdout or ''}\n{proc.stderr or ''}".strip()
     tail = output[-MAX_RUN_OUTPUT:] if len(output) > MAX_RUN_OUTPUT else output
@@ -793,9 +777,11 @@ def _run_script(target: ScriptTarget, file_name: str) -> str:
         return f"执行通过（exit code 0）：{path}\n{tail}"
     if proc.returncode == 5 and target.runner == "pytest":
         # pytest 约定：exit code 5 = 没有收集到任何用例
-        return (f"执行未收集到任何测试用例（exit code 5）：{path}\n{tail}\n"
-                f"请确认脚本里的测试函数以 `test_` 开头（pytest 只收集 test_* 函数），"
-                f"修正后用 write_script 重写再执行。\n{_fix_hint(target)}")
+        return f"""执行未收集到任何测试用例（exit code 5）：{path}
+            {tail}
+            请确认脚本里的测试函数以 `test_` 开头（pytest 只收集 test_* 函数），\
+            修正后用 write_script 重写再执行。
+            {_fix_hint(target)}"""
     hint = _assert_hint(target) if _is_assertion_failure(target, output) else _fix_hint(target)
     return f"执行失败（exit code {proc.returncode}）：{path}\n{tail}\n{hint}"
 
@@ -841,8 +827,8 @@ def build_bound_tools(target: Union[str, ScriptTarget]) -> list[BaseTool]:
     # 工具描述必须与 write_script 的回执口径一致 —— 两处说法相反时，模型会挑对自己
     # 方便的那一条（实测：回执说「必须跑一次」，它就一定跑，同一条用例被重复执行）。
     new_script_policy = (
-        "刚由本轮真实步骤生成的脚本，保存后即完成：本领域**没有 run_script 工具**，"
-        "任何情况下都不要试图执行脚本"
+        """刚由本轮真实步骤生成的脚本，保存后即完成：本领域**没有 run_script 工具**，\
+        任何情况下都不要试图执行脚本"""
         if not bound.expose_run_script else
         "刚由本轮真实步骤生成的脚本，保存后即完成，不要再调用 run_script 重复执行"
     )
@@ -852,11 +838,11 @@ def build_bound_tools(target: Union[str, ScriptTarget]) -> list[BaseTool]:
         _as_tool(_read, "read_script",
                  f"读取{where}下指定脚本（如 ***.py）的完整内容；修复脚本前必须先调用它"),
         _as_tool(_write, "write_script",
-                 f"把{bound.stack}的自动化测试代码保存到{where}下的 file_name 文件中"
-                 f"（只做语法检查 + 未定义名检查 + 落盘，**不会执行脚本**）。"
-                 f"code 必须是完整可运行的 Python 代码（新建与修复都用它整体覆盖写入）；"
-                 f"写入前会做语法检查与未定义名检查，问题以 Observation 返回，需修正后重新调用。"
-                 f"{new_script_policy}"),
+                 f"""把{bound.stack}的自动化测试代码保存到{where}下的 file_name 文件中\
+                （只做语法检查 + 未定义名检查 + 落盘，**不会执行脚本**）。\
+                code 必须是完整可运行的 Python 代码（新建与修复都用它整体覆盖写入）；\
+                写入前会做语法检查与未定义名检查，问题以 Observation 返回，需修正后重新调用。\
+                {new_script_policy}"""),
     ]
     # expose_run_script=False 的自定义领域**不给** run_script 工具：这是「第二环无论如何
     # 都不执行脚本」的机械保证 —— 只写提示语不够，工具还在模型手里它就总会找机会跑一遍。
@@ -865,10 +851,10 @@ def build_bound_tools(target: Union[str, ScriptTarget]) -> list[BaseTool]:
     if bound.expose_run_script:
         bound_tools.append(
             _as_tool(_run, "run_script",
-                     f"用 {bound.runner} 执行{where}下的指定脚本，返回执行是否通过与失败摘要。"
-                     f"用于：目标脚本原本就存在时**直接执行**复核（执行步骤失败就修复到跑通，"
-                     f"断言成功/失败不在判断范围内）、用 write_script 修复脚本之后确认。"
-                     f"刚生成的新脚本不要重复执行一遍"))
+                     f"""用 {bound.runner} 执行{where}下的指定脚本，返回执行是否通过与失败摘要。\
+                    用于：目标脚本原本就存在时**直接执行**复核（执行步骤失败就修复到跑通，\
+                    断言成功/失败不在判断范围内）、用 write_script 修复脚本之后确认。\
+                    刚生成的新脚本不要重复执行一遍"""))
     return bound_tools
 
 
@@ -903,30 +889,30 @@ def build_generic_tools() -> list[BaseTool]:
     # 去调 run_script，白拿一条 Observation（多领域模式下这个工具是共享的）。
     # 内置 web / api / app 都提供执行能力，因此这里通常为空串。
     no_run_domains = "、".join(t.key for t in TARGETS.values() if not t.expose_run_script)
-    no_run_desc = (f"注意：{no_run_domains} 领域不提供脚本执行能力（第二环落盘即完成，"
-                   f"任何情况下都不执行脚本），对它调用 run_script 只会拿到一句说明。"
+    no_run_desc = (f"""注意：{no_run_domains} 领域不提供脚本执行能力（第二环落盘即完成，\
+        任何情况下都不执行脚本），对它调用 run_script 只会拿到一句说明。"""
                    if no_run_domains else "")
     return [
         _as_tool(_targets, "list_targets",
                  "列出全部可用的脚本领域（target）及其技术栈与脚本目录，不确定领域时先调用它"),
         _as_tool(_list, "list_scripts",
-                 f"列出指定领域（target：{domains}）脚本目录下已存在的自动化脚本文件名，"
-                 f"用于判断目标脚本是否已经生成过"),
+                 f"""列出指定领域（target：{domains}）脚本目录下已存在的自动化脚本文件名，\
+                用于判断目标脚本是否已经生成过"""),
         _as_tool(_read, "read_script",
                  f"读取指定领域脚本的完整内容；修复脚本前必须先调用它。{target_desc}"),
         _as_tool(_write, "write_script",
-                 f"把自动化测试代码保存到指定领域的脚本目录下（只做语法检查 + 未定义名检查 + 落盘，"
-                 f"**不会执行脚本**）。{target_desc}。"
-                 f"code 必须是完整可运行的 Python 代码（新建与修复都用它整体覆盖写入）；"
-                 f"写入前会做语法检查与未定义名检查，问题以 Observation 返回，需修正后重新调用。"
-                 f"刚由本轮真实步骤生成的新脚本，保存后即完成，**不要**再调用 run_script 重复执行"
-                 f"（本轮步骤已在真实环境里跑通过一遍）；run_script 只用于「脚本原本就存在时的复核」"
-                 f"与「修复写回之后的确认」。{no_run_desc}"),
+                 f"""把自动化测试代码保存到指定领域的脚本目录下（只做语法检查 + 未定义名检查 + 落盘，\
+                **不会执行脚本**）。{target_desc}。\
+                code 必须是完整可运行的 Python 代码（新建与修复都用它整体覆盖写入）；\
+                写入前会做语法检查与未定义名检查，问题以 Observation 返回，需修正后重新调用。\
+                刚由本轮真实步骤生成的新脚本，保存后即完成，**不要**再调用 run_script 重复执行\
+                （本轮步骤已在真实环境里跑通过一遍）；run_script 只用于「脚本原本就存在时的复核」\
+                与「修复写回之后的确认」。{no_run_desc}"""),
         _as_tool(_run, "run_script",
-                 f"执行指定领域脚本目录下的脚本（pytest 领域用 pytest 跑），"
-                 f"返回执行是否通过与失败摘要。用于：目标脚本原本就存在时**直接执行**复核"
-                 f"（执行步骤失败就修复到跑通，断言成功/失败不在判断范围内）、"
-                 f"用 write_script 修复脚本之后确认。{target_desc}。{no_run_desc}"),
+                 f"""执行指定领域脚本目录下的脚本（pytest 领域用 pytest 跑），\
+                返回执行是否通过与失败摘要。用于：目标脚本原本就存在时**直接执行**复核\
+                （执行步骤失败就修复到跑通，断言成功/失败不在判断范围内）、\
+                用 write_script 修复脚本之后确认。{target_desc}。{no_run_desc}"""),
     ]
 
 
@@ -1009,8 +995,8 @@ if __name__ == "__main__":
     canary_run_receipt = canary_tools["run_script"].invoke({"file_name": "smoke_canary.py"})
     assert "boom_canary" in canary_run_receipt, \
         "run_script 应当真的执行脚本：没看到 canary 抛出的 boom_canary"
-    print("canary 对照通过：run_script 真的执行了它（看到 boom_canary），"
-          "而 write_script 落盘时没有")
+    print("""canary 对照通过：run_script 真的执行了它（看到 boom_canary），\
+    而 write_script 落盘时没有""")
 
     # 2) 多领域模式：工具带 target 参数，且支持技术栈别名（requests->api、appium->app）
     generic_tools = {t.name: t for t in build_script_tools()}

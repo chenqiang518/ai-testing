@@ -215,16 +215,16 @@ def ensure_foreground(driver: Any, app_package: str, app_activity: str) -> str:
         sleep(ACTIVITY_POLL_INTERVAL)
         package, _ = _wait_activity_stable(driver)
     except WebDriverException as exc:
-        return (f"启动 {app_package}/{app_activity} 后前台是 {package or '未知'}，"
-                f"尝试用 activate_app 拉起也失败：{exc}。"
-                f"请确认该 app 已安装（adb shell pm list packages | grep {app_package}）。")
+        return f"""启动 {app_package}/{app_activity} 后前台是 {package or '未知'}，\
+            尝试用 activate_app 拉起也失败：{exc}。\
+            请确认该 app 已安装（adb shell pm list packages | grep {app_package}）。"""
     if package == app_package:
         return ""
-    return (f"启动 {app_package}/{app_activity} 后前台仍是 {package or '未知'}，"
-            f"说明这个 app_activity 不是本机的入口。请用 "
-            f"`adb shell cmd package resolve-activity --brief {app_package}` "
-            f"查出真实入口（MIUI 的设置是 .MainSettings，AOSP 才是 .Settings），"
-            f"改正 md 前提条件里的 app activity 后重跑。")
+    return f"""启动 {app_package}/{app_activity} 后前台仍是 {package or '未知'}，\
+        说明这个 app_activity 不是本机的入口。请用 \
+        `adb shell cmd package resolve-activity --brief {app_package}` \
+        查出真实入口（MIUI 的设置是 .MainSettings，AOSP 才是 .Settings），\
+        改正 md 前提条件里的 app activity 后重跑。"""
 
 
 def create_driver(app_activity: Optional[str] = None,
@@ -295,13 +295,11 @@ _UIAUTOMATOR_RE = re.compile(r"^new\s+Ui(Selector|Scrollable|Object|Collection)\
 # Android 控件全限定类名
 _CLASS_NAME_RE = re.compile(r"^(?:android|androidx|com|io|org|net)\w*(?:\.\w+)+$")
 
-_LOCATOR_HINT = (
-    "Appium 不支持 css 选择器，也不接受「只给一段可见文本」。"
-    "按文本定位请写 xpath，如 //*[contains(@text,'省电与电池')]；"
-    "按 resource-id 定位请写 id=com.android.settings:id/title；"
-    "按 content-desc 定位请写 acc=更多；"
-    "控件到底有哪些属性，先用 get_page_source 拿当前界面的控件层级摘要再决定。"
-)
+_LOCATOR_HINT = """Appium 不支持 css 选择器，也不接受「只给一段可见文本」。\
+            按文本定位请写 xpath，如 //*[contains(@text,'省电与电池')]；\
+            按 resource-id 定位请写 id=com.android.settings:id/title；\
+            按 content-desc 定位请写 acc=更多；\
+            控件到底有哪些属性，先用 get_page_source 拿当前界面的控件层级摘要再决定。"""
 
 
 def locator_of(locator: str) -> tuple[str, str]:
@@ -446,10 +444,9 @@ def summarize_hierarchy(xml_text: Optional[str], *,
         lines.append(row)
     text = "\n".join(lines)
     if len(text) > max_length:
-        text = text[:max_length].rstrip() + (
-            f"\n…（控件层级过长已截断，当前只列出前 {len(lines)} 个控件；"
-            "请用带 text / resource-id 的 xpath 精确到子树，或先滚动到目标区域再取摘要）"
-        )
+        text = text[:max_length].rstrip() + f"""
+            …（控件层级过长已截断，当前只列出前 {len(lines)} 个控件；\
+            请用带 text / resource-id 的 xpath 精确到子树，或先滚动到目标区域再取摘要）"""
     return text
 
 
@@ -556,9 +553,9 @@ def _swipe_direction(direction: str) -> str:
     if alias:
         return alias
     raise ValueError(
-        f"swipe 的方向 {direction!r} 不认识。可选值：{' / '.join(SWIPE_DIRECTIONS)}"
-        "（down = 露出更下面的条目，up = 回到更上面的条目，left / right = 横向翻页），"
-        f"也接受同义写法：{' / '.join(sorted(_SWIPE_ALIASES))}")
+        f"""swipe 的方向 {direction!r} 不认识。可选值：{' / '.join(SWIPE_DIRECTIONS)}\
+        （down = 露出更下面的条目，up = 回到更上面的条目，left / right = 横向翻页），\
+        也接受同义写法：{' / '.join(sorted(_SWIPE_ALIASES))}""")
 
 
 def swipe(driver: Any, direction: str, percent: float = 0.6) -> None:
@@ -639,8 +636,8 @@ def _uiautomator_scroll_into_view(by: str, expression: str) -> Optional[str]:
         matched = re.search(pattern, expression)
         if matched:
             value = matched.group(1).replace('"', '\\"')
-            return ('new UiScrollable(new UiSelector().scrollable(true).instance(0))'
-                    f'.scrollIntoView(new UiSelector().{method}("{value}").instance(0))')
+            return f"""new UiScrollable(new UiSelector().scrollable(true).instance(0))\
+                .scrollIntoView(new UiSelector().{method}("{value}").instance(0))"""
     return None
 
 
@@ -746,9 +743,9 @@ def texts_of(driver: Any, locator: str, timeout: float = DEFAULT_TIMEOUT) -> str
         # value 都没有。静默返回空串会让 `assert '电量' in texts_of(...)` 变成一句
         # 「实际：''」的断言失败，看不出是定位选错了节点。这里直接把话说清楚。
         raise AssertionError(
-            f"定位表达式命中了 {len(elements)} 个控件，但它们都没有可读文本：{locator}。"
-            f"通常是选到了容器 / 父节点（例如 `//*[contains(@text,'剩余电量')]//..`），"
-            f"请直接定位到带文本的控件本身，或用 page_text(driver) 取整页文本再断言")
+            f"""定位表达式命中了 {len(elements)} 个控件，但它们都没有可读文本：{locator}。\
+            通常是选到了容器 / 父节点（例如 `//*[contains(@text,'剩余电量')]//..`），\
+            请直接定位到带文本的控件本身，或用 page_text(driver) 取整页文本再断言""")
     return "\n".join(texts)
 
 
@@ -784,10 +781,10 @@ class AppiumWeb:
                                          app_package=self.app_package)
         except WebDriverException as exc:
             raise ValueError(
-                f"启动 Appium session 失败：{exc}。"
-                f"请确认 Appium server（{resolve_appium_server()}）已启动、"
-                f"设备已连接（adb devices 能看到）、且 app_package={self.app_package} "
-                f"app_activity={self.app_activity} 确实存在。"
+                f"""启动 Appium session 失败：{exc}。\
+                请确认 Appium server（{resolve_appium_server()}）已启动、\
+                设备已连接（adb devices 能看到）、且 app_package={self.app_package} \
+                app_activity={self.app_activity} 确实存在。"""
             ) from exc
         problem = self._ensure_foreground()
         if problem:
@@ -821,8 +818,8 @@ class AppiumWeb:
         """
         if self._driver is None:
             raise ValueError(
-                "Appium driver 尚未启动：请先调用 init(app_activity=..., app_package=...) "
-                "启动被测 app，再执行其它操作。"
+                """Appium driver 尚未启动：请先调用 init(app_activity=..., app_package=...) \
+启动被测 app，再执行其它操作。"""
             )
         return self._driver
 
@@ -929,9 +926,9 @@ class AppiumWeb:
         except TimeoutException:
             self._element = None
             raise NoSuchElementException(
-                f"{wait:g}s 内没找到匹配 {locator!r} 的控件。"
-                "请先用 get_page_source 看当前界面到底有哪些 text / resource-id / content-desc，"
-                f"并确认目标是否需要先 scroll_to_element 滚动出来。{_LOCATOR_HINT}"
+                f"""{wait:g}s 内没找到匹配 {locator!r} 的控件。\
+                请先用 get_page_source 看当前界面到底有哪些 text / resource-id / content-desc，\
+                并确认目标是否需要先 scroll_to_element 滚动出来。{_LOCATOR_HINT}"""
             ) from None
         self._element = elements[0]
         shown = "\n".join(_describe(_attrs_of(item)) for item in elements[:5])
@@ -954,8 +951,8 @@ class AppiumWeb:
                     EC.element_to_be_clickable((by, expression)))
             except TimeoutException:
                 raise NoSuchElementException(
-                    f"{wait:g}s 内没等到可点击的控件 {locator!r}（可能不可点或还没渲染完）。"
-                    f"请用 get_page_source 确认该控件是否带 clickable 标记。{_LOCATOR_HINT}"
+                    f"""{wait:g}s 内没等到可点击的控件 {locator!r}（可能不可点或还没渲染完）。\
+                    请用 get_page_source 确认该控件是否带 clickable 标记。{_LOCATOR_HINT}"""
                 ) from None
         elif self._element is None:
             raise ValueError("没有可点击的元素：请先调用 find，或直接给 click 传 locator")
@@ -963,8 +960,8 @@ class AppiumWeb:
             self._element.click()
         except WebDriverException as exc:
             raise ValueError(
-                f"点击失败：{exc}。若报 'element not interactable' 说明该控件本身不可点，"
-                "请用 get_page_source 找它**外层带 clickable 的父容器**再点。"
+                f"""点击失败：{exc}。若报 'element not interactable' 说明该控件本身不可点，\
+                请用 get_page_source 找它**外层带 clickable 的父容器**再点。"""
             ) from exc
         self._wait_activity_stable()
         return f"已点击 {locator or '上一次 find 命中的元素'}，当前界面控件摘要：\n{self.source()}"
@@ -988,8 +985,8 @@ class AppiumWeb:
                     EC.element_to_be_clickable((by, expression)))
             except TimeoutException:
                 raise NoSuchElementException(
-                    f"{wait:g}s 内没等到可输入的控件 {locator!r}。"
-                    f"请用 get_page_source 确认它是否是 EditText。{_LOCATOR_HINT}"
+                    f"""{wait:g}s 内没等到可输入的控件 {locator!r}。\
+                    请用 get_page_source 确认它是否是 EditText。{_LOCATOR_HINT}"""
                 ) from None
         elif self._element is None:
             raise ValueError("没有可输入的元素：请先调用 find，或直接给 send_keys 传 locator")
@@ -1014,9 +1011,9 @@ class AppiumWeb:
         found = scroll_to(driver, locator, max_swipes=max_swipes)
         if found is None:
             raise NoSuchElementException(
-                f"向下滚动 {max_swipes} 屏仍未找到 {locator!r}。"
-                "说明该文本在当前界面体系里不存在：请检查是否走错了入口，"
-                "或用 get_page_source 看看当前界面上的真实文本再改定位表达式。"
+                f"""向下滚动 {max_swipes} 屏仍未找到 {locator!r}。\
+                说明该文本在当前界面体系里不存在：请检查是否走错了入口，\
+                或用 get_page_source 看看当前界面上的真实文本再改定位表达式。"""
             )
         self._element = found
         return f"已滚动到目标，命中控件：{_describe(_attrs_of(found))}"
