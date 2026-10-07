@@ -441,7 +441,13 @@ def select_test_cases(
         select_all: True 时返回全部用例（`--all-cases`）。
 
     Returns:
-        选中的用例列表；未指定时取文档里的第一条（保持「不带参数也能跑」的老行为）。
+        选中的用例列表；未指定 keyword 且 select_all=False 时取文档里的第一条。
+
+    注意：`select_all=False` 只是**工具函数层面的保守默认**，不等于各领域入口该有的默认
+    行为。入口如果希望「不带参数就把文档里的用例全跑一遍」，必须显式传 select_all=True
+    （src/web/generate_autoweb.py 就是这么做的：不带 --case 时 RUN_ALL_CASES 为真）——
+    否则 md 里第二条及以后新增的用例永远不会被执行，看起来像「用例场景丢了」，
+    实际只是没被选中（--list-cases 仍能完整列出，很容易误判成解析问题）。
     """
     all_cases = list(cases)
     if select_all:

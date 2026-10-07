@@ -234,7 +234,7 @@ class StepRecorder(BaseCallbackHandler):
     步骤 json 是第二环写代码的唯一事实来源，而采集过程里必然掺着大量失败尝试
     （实测「行政区域 / 区域名称」那轮 25 步里有 13 步是非法选择器 `td:contains('北京市') + td button`
     的重复失败）。不标注的话，第二环会把这些废选择器当成「已验证可用」照抄进脚本，
-    run_script 直接 InvalidSelectorException；标注后 prompt 里明确要求「failed 的步骤禁止照抄」。
+    脚本执行验证时直接 InvalidSelectorException；标注后 prompt 里明确要求「failed 的步骤禁止照抄」。
     """
 
     def __init__(self, tool_names: frozenset[str]) -> None:
@@ -300,18 +300,35 @@ web_agent_executor = AgentExecutor(
 #   query  = 前提条件 + 测试步骤 + 预期结果（由 build_query 渲染，见下）。
 #
 # 选哪条用例（命令行优先于环境变量，与 --force-collect 的约定一致）：
-#   python src/web/generate_autoweb.py                        # 文档里的第一条用例
+#   python src/web/generate_autoweb.py                        # 文档里的**全部**用例（默认）
+#   python src/web/generate_autoweb.py --all-cases             # 同上，把「跑全部」显式写出来
+#   python src/web/generate_autoweb.py --first-case            # 只跑文档里的第一条（调试用）
 #   python src/web/generate_autoweb.py --case 行政区域_区域名称  # 指定用例
 #   python src/web/generate_autoweb.py --case 区域名称          # 末级标题也能匹配
 #   WEB_TESTCASE=行政区域_区域名称 python src/web/generate_autoweb.py
-#   python src/web/generate_autoweb.py --all-cases             # 顺序跑文档里全部用例
 #   python src/web/generate_autoweb.py --list-cases            # 只列用例清单，不调大模型
 #   python src/web/generate_autoweb.py --case-file src/app/testcase/ip.md   # 换用例文档
+#
+# 为什么默认是「全部」而不是「第一条」（本轮修复）：
+#   旧行为是 `select_test_cases(..., select_all=False)` -> 未指定 --case 时只取文档里的
+#   第一条用例，于是 `python src/web/generate_autoweb.py` 跑完「# 1. 首页登录」就结束，
+#   「# 2. 行政区域 / ## 2.1 区域名称1」以及文档里后续新增的用例**一条都不会执行**。
+#   这种现象很容易被误判成「用例解析不到 / 场景丢了」，其实解析是好的（启动日志里
+#   「解析到 2 条用例」、--list-cases 也能完整列出来），只是没被选中。
+#   用例文档既然是唯一事实来源，「文档里有几条就跑几条」才符合直觉；要缩小范围就用
+#   --case <名称> / --first-case 显式表达。
 DEFAULT_TESTCASE_FILE: Path = Path(__file__).resolve().parent / "testcase" / "home_page.md"
 CASE_FILE_FLAG = "--case-file"
 CASE_FLAG = "--case"
 ALL_CASES_FLAGS = ("--all-cases", "--all")
+# 只跑文档里的第一条用例（即旧默认行为）：调试单条用例、又不想敲用例名时用
+FIRST_CASE_FLAGS = ("--first-case", "--first")
 LIST_CASES_FLAGS = ("--list-cases", "--list")
+# 打印用法后直接退出。这里的开关是手写 sys.argv 解析（没用 argparse，见 _cli_flag /
+# _cli_option），所以 argparse 自带的 -h/--help 并不存在：不加这一条的话 `--help`
+# 会被当成无意义参数**静默忽略**，然后照常跑起完整流水线（开浏览器 + 调大模型 +
+# 烧 token），实测踩过。帮助文本见文件末尾的 USAGE / print_usage。
+HELP_FLAGS = ("--help", "-h")
 CASE_FILE_ENV = "WEB_TESTCASE_FILE"
 CASE_ENV = "WEB_TESTCASE"
 # 前置用例（前提条件）准备开关：默认**开** —— 开跑本用例前，会先把「前提条件」引用的
@@ -367,13 +384,23 @@ def resolve_testcase_file(cli: Optional[str] = None) -> Path:
 # SCRIPT_NAME 要从第一条用例推导，返回空列表只会在下游变成难排查的 IndexError。
 TESTCASE_FILE: Path = resolve_testcase_file()
 TEST_CASES: list[TestCase] = load_test_cases(TESTCASE_FILE)
+# 本轮要跑哪些用例：
+#   --case <名称> / WEB_TESTCASE=<名称> -> 只跑这一条；
+#   --first-case                        -> 只跑文档里的第一条（旧默认行为）；
+#   其余情况（什么都不带、或显式 --all-cases）-> 文档里的**全部**用例，一条都不漏。
+CASE_KEYWORD: str = _cli_option(CASE_FLAG) or os.getenv(CASE_ENV, "").strip()
+RUN_ALL_CASES: bool = (
+    _cli_flag(*ALL_CASES_FLAGS)
+    or not (CASE_KEYWORD or _cli_flag(*FIRST_CASE_FLAGS))
+)
 SELECTED_CASES: list[TestCase] = select_test_cases(
     TEST_CASES,
-    _cli_option(CASE_FLAG) or os.getenv(CASE_ENV, "").strip(),
-    select_all=_cli_flag(*ALL_CASES_FLAGS),
+    CASE_KEYWORD,
+    select_all=RUN_ALL_CASES,
 )
-# 本轮「主用例」：模块级函数的默认参数，也是不带 --case 时唯一要跑的那条。
-# 一次跑多条（--all-cases）时，main() 会把当前用例放进 chain 的 inputs["case"]，
+# 本轮「主用例」：模块级函数的默认参数（单独 import 本模块验证时也用它），
+# 以及 --case / --first-case 只跑一条时的目标。
+# 一次跑多条（默认 / --all-cases）时，main() 会把当前用例放进 chain 的 inputs["case"]，
 # 由 _case_of() 取用（见 web_execute_result / persist_and_verify）。
 CASE: TestCase = SELECTED_CASES[0]
 # 目标脚本名 = 用例名 + ".py"：第一环「是否需要采集步骤」与第二环「落盘/执行哪个文件」
@@ -399,13 +426,14 @@ print(f"测试用例文档：{TESTCASE_FILE}（解析到 {len(TEST_CASES)} 条�
       f"--list-cases 查看全部）")
 if len(SELECTED_CASES) == 1:
     print(f"本轮用例：{CASE.name} -> 目标脚本 {SCRIPTS_DIR / CASE.script_name}"
-          f"（--case <名称> 指定用例，--all-cases 全部用例，--case-file <md> 换文档）")
+          f"（--case <名称> 指定用例，--first-case 只跑第一条，--case-file <md> 换文档）")
 else:
     # 多条用例时逐条列出「用例名 -> 脚本名」，目标脚本一行只写一个反而会误导
-    print(f"本轮用例：共 {len(SELECTED_CASES)} 条，顺序执行于 {SCRIPTS_DIR}")
+    print(f"本轮用例：共 {len(SELECTED_CASES)} 条（文档里的全部用例），顺序执行于 {SCRIPTS_DIR}")
     for _index, _case in enumerate(SELECTED_CASES, start=1):
         print(f"  {_index}. {_case.name} -> {_case.script_name}")
-    print("（--case <名称> 只跑一条，--list-cases 查看全部，--case-file <md> 换文档）")
+    print("（不带开关即跑全部用例；--case <名称> 只跑一条，--first-case 只跑第一条，"
+          "--list-cases 查看全部，--case-file <md> 换文档）")
 
 
 def target_script_path(case: TestCase = CASE) -> Path:
@@ -437,7 +465,7 @@ def target_script_exists(case: TestCase = CASE) -> bool:
 #
 # 背景：`行政区域_区域名称` 的前提条件写着「首页登录」。改造前只有 build_query 里那句
 # 「前提条件里的前置操作要在浏览器里先做完」，于是**每条用例的脚本都把登录抄一遍**
-# （账号密码、选择器、等跳转全重复）：登录页一改版要改 N 个脚本，每次 run_script 还要
+# （账号密码、选择器、等跳转全重复）：登录页一改版要改 N 个脚本，每次执行脚本还要
 # 多跑 N 遍登录。现在的处理规则（开跑本用例前由 ensure_precondition_scripts 落地）：
 #   1. 前提条件为空 / 只有「1. 」这类空占位 -> 什么都不做，也不给脚本补登录；
 #   2. 前提条件能在用例文档里匹配到一条用例（如「首页登录」-> 首页登录.py）：
@@ -445,8 +473,11 @@ def target_script_exists(case: TestCase = CASE) -> bool:
 #           -> 直接复用：本用例脚本 `from src.web.scripts.首页登录 import login`，
 #              严禁把登录流程重写一遍；
 #        b. 已存在，但只有 `test_login(driver)`（没有入口函数）-> 先做一次**确定性最小重构**
-#           补出入口函数（add_reusable_entry，用 ast 改名 + 加转发包装，不走 LLM），
-#           run_script 验证通过后复用；验证出现结构性失败会自动回滚原文件；
+#           补出入口函数（add_reusable_entry，用 ast 改名 + 加转发包装，不走 LLM，
+#           结果先过 ast.parse 语法自检）。这类脚本本轮没有真跑过，所以重构后会
+#           run_script 复核一次（verify=True），结构性失败自动回滚原文件；
+#           而「刚生成的脚本」一律 verify=False —— 用例已在真实浏览器里跑过一遍，
+#           落盘后再执行就是重复执行；
 #        c. 不存在 -> 把前置用例当一条独立用例跑完整 chain（必要时开浏览器采集步骤），
 #           **重新生成**出带入口函数的 首页登录.py，再复用；
 #   3. 前提条件在文档里找不到对应用例（如「已有一条商品数据」这类环境/数据描述）
@@ -880,11 +911,12 @@ query: str = build_query(CASE)
 
 # ---- 步骤缓存：让「浏览器采集」这件事只发生一次 ----
 # 第一环的唯一产出是「页面上真实存在、且已验证可用的 css 选择器」，代价却是把整个
-# 登录流程在浏览器里真跑一遍；而第二环 run_script 验证生成的脚本时还要再登录一次。
-# 于是「脚本不存在」时每次运行都要登录两遍（探索一遍 + 验证一遍）—— 其中探索那一遍
-# 在测试步骤没变的前提下纯属重复劳动。把采集结果落盘缓存即可吸收掉：
-#     首次运行：采集(登录 1 次) + run_script(登录 1 次)
-#     之后运行：读缓存(登录 0 次) + run_script(登录 1 次)
+# 登录流程在浏览器里真跑一遍。第二环的 write_script 只落盘、不执行（理由见
+# src/utils/script_tools.py 顶部注释），所以「生成脚本」这件事本身是 0 次登录；
+# 只有「脚本已存在 -> run_script 复核」「复核失败 -> 修复后再确认」才会再登录一次。
+# 在测试步骤没变的前提下，探索那一遍纯属重复劳动，把采集结果落盘缓存即可吸收掉：
+#     首次运行：采集(登录 1 次) + write_script 落盘(登录 0 次)
+#     之后运行：跳过采集(登录 0 次) + run_script 复核已存在脚本(登录 1 次)
 # 缓存放在 src/web/.steps/ 而不是 scripts/ 里：scripts 是 pytest 的收集目录，不该混进
 # 非脚本产物；该目录已加入 .gitignore（缓存内容取决于线上页面的实时结构，不宜提交）。
 STEPS_CACHE_DIR = Path(__file__).resolve().parent / ".steps"
@@ -918,7 +950,7 @@ def steps_complete(steps_info: object) -> bool:
          随便给个 Final Answer 收场）。实测「行政区域 / 区域名称」就是这样：25 步里
          13 步是 `td:contains('北京市') + td button` 这种非法 css 的重复失败，既没真点开
          展开箭头、也没有最终断言，却因为「有 open + 有 click」被判为完整、缓存了下来，
-         第二环照着它生成脚本，run_script 必然 InvalidSelectorException / TimeoutException。
+         第二环照着它生成脚本，脚本一执行必然 InvalidSelectorException / TimeoutException。
     """
     if not isinstance(steps_info, list) or not steps_info:
         return False
@@ -1057,8 +1089,9 @@ def resolve_steps(case: TestCase = CASE) -> tuple[str, str]:
         "cache"   命中步骤缓存：用上次采集到的真实步骤生成脚本，本轮不打开浏览器；
         "browser" 前两者都不成立：必须真的采集一次（本轮唯一的探索性登录）。
 
-    只有 "browser" 会触发第一环的页面探索，因此每条用例的登录次数从「每次运行 2 次」
-    降为「首次 2 次、之后每次 1 次」—— 剩下的那一次是 run_script 跑用例本身，不能省。
+    只有 "browser" 会触发第一环的页面探索；而第二环的 write_script 只落盘、不执行脚本，
+    所以「脚本不存在」的那一轮全程只登录 1 次（就是采集那一次）。
+    脚本已存在时（"skip"）本轮不采集，那一次登录发生在 run_script 复核既有脚本时。
     """
     if force_collect():
         return "", "browser"
@@ -1135,8 +1168,8 @@ def collect_steps_in_browser(case: TestCase = CASE) -> str:
 def web_execute_result(inputs: dict) -> str:
     """第一环入口：按「脚本已存在 / 命中步骤缓存 / 需要真采集」三种情况给出步骤 json。
 
-    只有第三种情况会打开浏览器，前两种都是 0 次登录，
-    因此不会与第二环 run_script 的验证登录叠加成「一次运行登录两遍」。
+    只有第三种情况会打开浏览器，前两种都是 0 次登录；第二环 write_script 只落盘不执行，
+    因此也不会叠加成「一次运行登录两遍」（只有脚本已存在时的 run_script 复核会登录一次）。
 
     用例取自 inputs["case"]（--all-cases 时由 main() 逐条传入），
     缺省回落到模块级 CASE，所以单独 import 本模块调用也是可用的。
@@ -1145,7 +1178,7 @@ def web_execute_result(inputs: dict) -> str:
     steps, source = resolve_steps(case)
     if source == "skip":
         print(f"目标脚本已存在：{target_script_path(case)}，跳过浏览器步骤采集"
-              f"（避免与 run_script 重复登录一次；需要重采请加 --force-collect）")
+              f"（避免与第二环 run_script 复核重复登录一次；需要重采请加 --force-collect）")
         return steps
     if source == "cache":
         print(f"命中步骤缓存：{steps_cache_path(case)}，本轮不打开浏览器重复执行"
@@ -1177,16 +1210,103 @@ def web_execute_result(inputs: dict) -> str:
 #   把这类**可机械修复**的坏转义修掉（见 repair_json_arguments）。
 # 第一环仍保留 structured chat（其入参都是短字符串，且已验证可用）。
 _INVALID_JSON_ESCAPE = re.compile(r"\\(?![\"\\/bfnrt]|u[0-9a-fA-F]{4})(.)", re.S)
+_VALID_JSON_ESCAPES = frozenset('"\\/bfnrt')
+
+
+def _is_json_string_end(rest: str) -> bool:
+    """字符串里遇到一个未转义的 `"`，判断它是「字符串正常收尾」还是「代码里的裸双引号」。
+
+    收尾的判据是它后面（跳过空白）接的东西必须是 JSON 结构符：
+        `:`（键值分隔）、`}` / `]`（容器结束）、字符串结尾，
+        或 `,` 且逗号后面确实跟着一个新值的开头（`"` / `{` / `[` / 数字 / true / false / null）。
+    `,` 之所以要再看一眼后面：write_script 的 code 参数里全是 Python 代码，
+    `foo("bar", baz)` 这种写法里 `"bar"` 后面同样跟着逗号，但它并不是 JSON 字符串的结尾；
+    只有逗号后面是 `"`（下一个键，如 `"file_name"`）时才像真的收尾。
+    """
+    stripped = rest.lstrip()
+    if not stripped:
+        return True
+    head = stripped[0]
+    if head in ":}]":
+        return True
+    if head != ",":
+        return False
+    after = stripped[1:].lstrip()
+    if not after:
+        return True
+    return (after[0] in '"{[-0123456789'
+            or after.startswith(("true", "false", "null")))
+
+
+def repair_json_string(raw: str) -> str:
+    """逐字符扫描，把 JSON 字符串值里的坏转义与裸双引号修成合法 JSON（不保证一定成功）。
+
+    在字符串内部按三类情况处理：
+      1. 合法转义（`\\\"` `\\\\` `\\/` `\\b` `\\f` `\\n` `\\r` `\\t` `\\uXXXX`）原样保留；
+      2. 非法转义：`\\'` 去掉反斜杠（JSON 里单引号不用转义），其它 `\\X` 补成 `\\\\X`
+         （解析回来仍是 `\\X`，不改变代码语义）；
+      3. 未转义的 `"`：按 _is_json_string_end 判断，是收尾就保留，否则补成 `\\\"`。
+    """
+    out: list[str] = []
+    in_string = False
+    index = 0
+    length = len(raw)
+    while index < length:
+        char = raw[index]
+        if not in_string:
+            if char == '"':
+                in_string = True
+            out.append(char)
+            index += 1
+            continue
+
+        if char == "\\":
+            following = raw[index + 1:index + 2]
+            if following in _VALID_JSON_ESCAPES:
+                out.append(char + following)
+                index += 2
+                continue
+            if following == "u" and re.fullmatch(r"[0-9a-fA-F]{4}", raw[index + 2:index + 6] or ""):
+                out.append(raw[index:index + 6])
+                index += 6
+                continue
+            if following == "'":
+                out.append("'")  # JSON 没有 \' 这个转义，单引号本来就不用转义
+                index += 2
+                continue
+            out.append("\\\\" + following)
+            index += 2
+            continue
+
+        if char == '"':
+            if _is_json_string_end(raw[index + 1:]):
+                in_string = False
+                out.append(char)
+            else:
+                out.append('\\"')  # 代码里的裸双引号：补转义，别让它提前结束 JSON 字符串
+            index += 1
+            continue
+
+        out.append(char)
+        index += 1
+    return "".join(out)
 
 
 def repair_json_arguments(raw: str) -> str:
-    """修复 function calling 入参里的非法 JSON 转义；本来就是合法 JSON 时原样返回。
+    """修复 function calling 入参里的非法 JSON；本来就是合法 JSON 时原样返回。
 
-    两类可机械修复的坏写法（都实测遇到过 / 属于模型把 Python 习惯带进 JSON）：
+    三类可机械修复的坏写法（都是实测踩过、模型把 Python 习惯带进 JSON 导致的）：
       1. `\\'`：JSON 没有这个转义（单引号在 JSON 字符串里根本不用转义）-> 去掉反斜杠；
       2. 其它非法转义 `\\X`（如正则里的 `\\s` 被原样写进 JSON）-> 补成 `\\\\X`，
-         解析回来仍是 `\\X`，不改变代码语义。
-    修完再校验一次；仍不合法就原样返回，让上层按原来的路径报错（不做无根据的猜测）。
+         解析回来仍是 `\\X`，不改变代码语义；
+      3. **代码里未转义的裸双引号**（write_script 的 code 参数最常见）-> 补成 `\\"`。
+         实测：模型写了 `assert ..., f'未找到含有"东城区"的文本'`，那两个 `"` 直接把
+         JSON 字符串提前截断，langchain 报 `Could not parse tool input ... not valid JSON`；
+         handle_parsing_errors 只会回一句「Invalid or incomplete response」，模型看不出
+         自己错在哪，下一轮原样再犯，连撞 13 次把 15 轮 max_iterations 全烧光，
+         脚本一个字都没落盘（第 1、2 类修复对它无效，必须按字符串边界扫描才修得动）。
+    逐级尝试、每级都用 json.loads 校验；全修不好就原样返回，让上层按原来的路径报错
+    （不做无根据的猜测，宁可失败也不写坏文件）。
     """
     if not raw:
         return raw
@@ -1199,9 +1319,15 @@ def repair_json_arguments(raw: str) -> str:
     fixed = _INVALID_JSON_ESCAPE.sub(lambda m: "\\\\" + m.group(1), fixed)
     try:
         json.loads(fixed)
+        return fixed
+    except ValueError:
+        pass
+    scanned = repair_json_string(raw)
+    try:
+        json.loads(scanned)
     except ValueError:
         return raw
-    return fixed
+    return scanned
 
 
 def repair_tool_call_arguments(message: Any) -> Any:
@@ -1245,7 +1371,8 @@ codegen_executor = AgentExecutor(
     #     --hide-debug-events=tool/start   或   --quiet 全关
     verbose=DEBUG_LOGGING,
     # 回调同样只走 invoke(config=run_config)，见 run_config 处的说明
-    # 一轮「生成 -> 执行 -> 修复」约 3~4 个 action，15 轮足够跑完 2 轮修复
+    # 一轮「生成 -> 落盘」只需 2~3 个 action（list_scripts -> write_script -> Final Answer）；
+    # write_script 不执行脚本，复核 / 修复场景才会多用几轮，15 轮足够跑完 2 轮修复
     max_iterations=15,
     handle_parsing_errors=True)
 
@@ -1277,20 +1404,36 @@ CODEGEN_TASK = """
     
     必须严格按以下流程使用工具，不要臆测文件是否存在：
     1. 先调用 list_scripts，确认 {script_name} 是否已经存在；
-    2. 已存在：调用 read_script 读取内容，再调用 run_script 执行验证；执行通过就不必重写；
-    3. 不存在：按下面的「代码规范」生成完整脚本，调用 write_script 保存，再调用 run_script 验证；
-    4. run_script 失败时按工具返回的提示区分处理：脚本步骤失败（定位/超时/语法/导入错误）
-       必须 read_script 后用 write_script 写入修复后的完整代码并重跑，最多修复 2 轮；
+    2. 已存在（说明本轮没有重新采集步骤）：调用 read_script 读取内容，再调用 run_script
+       执行验证；执行通过就不必重写；
+    3. 不存在：按下面的「代码规范」生成完整脚本，调用 write_script 保存，**保存完就结束** ——
+       write_script 只做语法检查 + 落盘，不会执行脚本；保存之后也**不要**再调用 run_script 去跑它。
+       原因：本轮的步骤 json 就是第一环在真实浏览器里把这条用例（含断言）完整跑通后记录下来的，
+       脚本里每个选择器都刚刚验证过；落盘后再执行一遍等于把同一条用例重复跑一次
+       （多登录一次被测站点、多烧一轮 LLM），信息量几乎为零，还可能因为环境抖动
+       把本来正确的脚本误判成有问题；
+       实测还踩过：模型把 run_script 的 file_name 抄错一个字（行政区域_区域名称.py 抄成
+       行政区域_地区名称.py），白跑一轮只拿到「脚本不存在」；
+    4. 只有下面两种情况才需要处理失败，且都要按工具返回的提示区分类型：
+       a) write_script 回执报「代码语法检查未通过」-> 修正代码后重新 write_script；
+       b) 第 2 步用 run_script 复核**已存在**的脚本时失败 -> 脚本步骤失败（定位/超时/语法/导入错误）
+          必须 read_script 后用 write_script 写入修复后的完整代码，再 run_script 确认，最多修复 2 轮；
        若同一个原因连续失败两次，说明是环境/被测站点问题，立即停止修复并在 Final Answer 中说明，
        不要重复写入内容相同的代码；断言失败说明脚本本身跑得通，不要改脚本；
        若是「元素定位不到 / 等待超时」连续失败两次，很可能是页面结构改版、上面的步骤已过期，
        此时必须在 Final Answer 中提示：用 `python src/web/generate_autoweb.py --force-collect`
        重新采集步骤（不要自己臆测新的 css 选择器）；
-    5. 结束后给出 Final Answer，说明脚本绝对路径、执行结论（通过 / 断言失败 / 修复了几轮）与关键改动。
+    5. 结束后给出 Final Answer，说明脚本绝对路径、执行结论（本轮新生成的脚本写「已按第一环
+       真实执行过的步骤落盘，未重复执行」；复核已有脚本则写 通过 / 断言失败 / 修复了几轮）与关键改动。
 
     代码规范：
     - 用 pytest 组织：driver 放在 fixture 里，yield 之后 driver.quit()，保证异常路径也能关浏览器；
       测试函数必须以 test_ 开头，否则 pytest 收集不到用例；
+    - 步骤 json 末尾那次 `quit` 是采集结束时关浏览器用的，脚本里**一律不要写** driver.quit()：
+      driver 的生命周期只由 fixture 管（yield 之后已经 quit 过）。实测踩过：业务函数结尾多写一句
+      driver.quit()，fixture 收尾再 quit 一次会抛 InvalidSessionIdException，把本来跑通的用例判成失败；
+      更糟的是这个函数还要给别的脚本 import 复用（如 login(driver)），提前 quit 会把调用方的
+      driver 一起关掉，后续步骤全部定位不到元素；
     - 脚本自身也要能被**后续用例复用**：把业务主流程（含断言）抽成一个不带 `test_` 前缀、
       不带 fixture 装饰器的函数，第一个参数固定为 driver，名字用语义化英文（登录用例就叫 `login`），
       `test_xxx(driver)` 只保留一行调用它。这样别的用例脚本才能直接
@@ -1337,6 +1480,13 @@ CODEGEN_TASK = """
       也不要 import 了 resolve_chromedriver / by_of 却不使用；
     - 元素定位的表达式只能取自上面步骤 json 中真实出现过、且**没有标 failed** 的 css 值，
       禁止凭经验臆测类名或层级；
+    - 步骤 json 里的步骤要**按原顺序逐条**落进脚本，禁止合并、禁止只保留其中一条：
+      用例文档里的一个「测试步骤」在真实页面上常常要连续点好几次（例如「点击左侧导航栏
+      商场管理 -> 行政区域」= 先点父级菜单 li[role='menuitem'].el-submenu 把子菜单展开，
+      再点子菜单 a[href='#/mall/region'] 才真正跳转），两次的 css 都在步骤 json 里，就都要写。
+      实测踩过：模型只保留了第一次 click，页面停在 dashboard 没跳转，后面
+      //tr[.//td[contains(., '北京市')]] 一直等到超时，自动验证的失败点看起来像「选择器过期」，
+      很容易把人误导去 --force-collect 重采（其实选择器是对的，是少点了一次）；
     - 脚本必须覆盖上面用例描述里的**全部**「测试步骤」，一条都不能漏；「前提条件」里的前置用例
       按上面给出的处理方式执行 —— 能 import 复用就只调用它的入口函数（如 `login(driver)`），
       **不要**在本脚本里把前置流程重写一遍；断言必须与「预期结果」逐条对应；
@@ -1350,12 +1500,30 @@ CODEGEN_TASK = """
           row_text = row_element.text.replace("\\n", "")
           assert '省' in row_text, f'缺少 省'
           assert '110000' in row_text, f'缺少 110000'
-      css 参数（若存在）表示断言范围的选择器，该选择器通常匹配**多个**元素，必须用
-      driver.find_elements（复数）取全部元素、聚合它们的 text 之后再逐个断言；
-      用 find_element（单数）只会拿到第一个元素，必然出现 assert '商场管理' in '首页' 这种假失败，
-      这属于脚本缺陷、必须修，不要当成被测系统的问题；
+      css 参数（若存在）表示断言范围的选择器，该选择器通常匹配**多个**元素：必须用
+      driver.find_elements（复数）取全部元素，**先把它们的 text 聚合成一个字符串，
+      再对每个期望文本各断言一次**；用 find_element（单数）只会拿到第一个元素，
+      必然出现 assert '商场管理' in '首页' 这种假失败，这属于脚本缺陷、必须修，
+      不要当成被测系统的问题。正确写法（先聚合、再逐项断言）：
+          rows = driver.find_elements(by_of(locator), locator)
+          assert rows, '断言范围内一个元素都没匹配到：' + locator
+          aggregated = ''.join(row.text.replace("\\n", "") for row in rows)
+          assert '市' in aggregated, '缺少 市'
+          assert '110100' in aggregated, '缺少 110100'
+      **禁止**写成「对每个匹配元素逐个断言」（for row in rows: assert '市' in row.text）：
+      element-ui 的固定列会把同一行再渲染一份副本，副本里的 text 常常是空串，
+      循环到它就变成 assert '市' in '' 直接失败。实测踩过：
+      `//tr[.//td[contains(., '市辖区')]]` 匹配到 2 个 tr（正文表格 + 固定列副本），
+      逐个断言时第二个的 text 为空，脚本报 AssertionError: 缺少 市 —— 页面数据其实是对的，
+      纯属脚本写法缺陷，必须改成聚合后断言；
     - f-string 里的变量占位符只写一层花括号（写成 f"缺少 {{{{text}}}}" 是错的，应写 f"缺少 {{text}}"）；
-    - 调用 write_script 时 code 参数必须是完整可运行的 Python 代码：不要 markdown 围栏、不要解释文字。
+    - code 参数是以 JSON 字符串传的：**代码里的字符串字面量内部不要再出现双引号**
+      （如 f'未找到含有"东城区"的文本'），需要强调就用中文引号「东城区」或干脆不加引号，
+      否则 JSON 字符串会被提前截断、整轮迭代白白浪费在入参解析失败上；
+      定位表达式本身用双引号包裹是安全的（如 "//tr[.//td[contains(., '北京市')]]"，里面只有单引号）；
+    - 调用 write_script 时 code 参数必须是完整可运行的 Python 代码：不要 markdown 围栏、不要解释文字；
+      write_script 只做语法检查 + 落盘、**不会执行脚本**，本轮新生成的脚本保存后也不要再调用
+      run_script 重复执行（这些步骤刚刚已在真实浏览器里跑通过一遍）。
 """
 
 # 第一环跳过采集时（脚本已存在），填进 CODEGEN_TASK 里 {step} 位置的替代说明。
@@ -1372,7 +1540,8 @@ def build_no_steps_note(case: TestCase = CASE) -> str:
         f"- 先 list_scripts 确认，再 read_script 读出现有内容，然后 run_script 执行验证；\n"
         f"- 执行通过、或只是断言失败：直接给出 Final Answer，**不要**调用 write_script；\n"
         f"- 仅当出现脚本步骤失败（定位/超时/语法/导入错误）时，才在现有代码基础上做最小化修复，"
-        f"用 write_script 写回完整代码后重跑，最多 2 轮；\n"
+        f"用 write_script 写回完整代码后再 run_script 确认修复生效，最多 2 轮"
+        "（本轮没有重新采集步骤，这次执行属于必要复核，不算重复执行）；\n"
         f"- 本轮没有步骤 json，禁止凭空生成新脚本、禁止臆测或改写现有 css 选择器，"
         f"也不要为了「补采集」而重复执行登录流程。"
     )
@@ -1421,7 +1590,8 @@ def build_precondition_note(case: TestCase = CASE,
                 "不带 fixture 装饰器的函数，第一个参数是 driver，名字语义化（登录流程就叫 `login`）；"
                 "原来的 test_* 函数只保留一行调用；driver fixture / import / 选择器 / 等待**全部保持原样**；",
                 f"   - write_script 覆盖写回**同名文件** `{ref.script_path.name}`，"
-                "再 run_script 确认它仍然通过；",
+                "再 run_script 确认它仍然通过（重构改的是既有脚本、本轮没有真实执行过它，"
+                "这次验证是必要的）；",
                 f"   - 然后在本用例脚本里写 `from {ref.module_name} import <入口函数名>` 并调用它"
                 "（入口函数名就是上一步抽出来的那个，如 `login`），同样禁止重写前置流程。",
             ])
@@ -1430,7 +1600,7 @@ def build_precondition_note(case: TestCase = CASE,
                 f"{index}. 「{ref.text}」-> 前置脚本 `{ref.case.script_name}` 在 `{SCRIPTS_DIR}` 下不存在：",
                 f"   - 先按前置用例「{ref.case.name}」（{ref.case.hierarchy}）的测试步骤生成"
                 f" `{ref.case.script_name}`，同样要带可复用入口函数（如 `login(driver)`），"
-                "run_script 验证通过；",
+                "write_script 保存即可（它的第一环已在浏览器里真实跑通，不要再 run_script 重复执行）；",
                 f"   - 再在本用例脚本里 import `{ref.module_name}` 的入口函数复用，"
                 "禁止把前置流程抄进本脚本。",
             ])
@@ -1444,7 +1614,12 @@ def build_precondition_note(case: TestCase = CASE,
 
 
 def persist_and_verify(inputs: dict) -> str:
-    """把第一环收集到的真实步骤交给代码生成 agent：生成 -> 落盘 -> 执行 -> 失败则修复。
+    """把第一环收集到的真实步骤交给代码生成 agent：生成 -> 落盘 ->（按需）执行 -> 失败则修复。
+
+    write_script 只做「语法自检 -> 落盘」，**不会执行脚本**（理由见 src/utils/script_tools.py
+    顶部注释）：本轮步骤已在真实浏览器里完整跑通过一遍（含断言），落盘后再执行一次就是把
+    同一条用例重复跑一遍。只有「脚本已存在时的复核」与「修复之后的确认」这两种
+    本轮没有真跑过用例的情况，才由 agent 显式调用 run_script。
 
     第一环跳过采集时（脚本已存在，step 为空数组）改用 build_no_steps_note(case)，
     让 agent 只「跑现有脚本 + 按需修复」，不再重写脚本。
@@ -1586,8 +1761,27 @@ def _entry_refactor_broke(output: str) -> bool:
     return True
 
 
-def add_reusable_entry(case: TestCase, label: str = "前置脚本") -> Optional[str]:
-    """给「只有 test_xxx(driver)、没有可复用入口」的前置脚本补一个入口函数。
+def _entry_refactor_reason(output: str) -> str:
+    """从 run_script 输出里挑出**真正的失败原因**那一行。
+
+    不能直接取最后一个非空行：run_script 的失败输出末尾固定跟着 _fix_hint 的通用建议，
+    实测拿到的就是「点击没反应：点击前要用 EC.element_to_be_clickable ...」这类文案，
+    真实的 ImportError / TimeoutException 反而被淹没，把人带偏去查选择器。
+    这里优先取 pytest 的 `E ` 错误行 / 首个含 Error|Exception 的行，
+    都没有就退回首行结论（`执行失败（exit code N）：<路径>`）。
+    """
+    lines = [line.strip() for line in (output or "").splitlines() if line.strip()]
+    if not lines:
+        return (output or "").strip()
+    for line in lines:
+        if line.startswith("E ") or "Error" in line or "Exception" in line:
+            return line
+    return lines[0]
+
+
+def add_reusable_entry(case: TestCase, label: str = "前置脚本", *,
+                       verify: bool = False) -> Optional[str]:
+    """给「只有 test_xxx(driver)、没有可复用入口」的脚本补一个入口函数。
 
     改动只有两处（业务逻辑、fixture、import、选择器全部原样不动）：
         1. 唯一的 `test_login(driver)` 原地改名为 `login(driver)`；
@@ -1595,11 +1789,23 @@ def add_reusable_entry(case: TestCase, label: str = "前置脚本") -> Optional[
                def test_login(driver):
                    login(driver)
 
-    改完立刻用 run_script 跑一遍验证；结构性失败会把文件回滚成原样并返回 None
+    重构结果一律先过 `ast.parse` 语法自检，不通过就保持原文件不动。
+
+    verify=False（默认）：**到此为止，不执行脚本**。这是绝大多数场景的正确选择 ——
+    两个调用点（第二环刚结束的目标脚本、刚由第一环真实步骤生成的前置脚本）本轮都已经
+    把这条用例在真实浏览器里跑过一遍了，而重构只是「改名 + 加转发」的纯机械变换，
+    再跑一遍等于把同一条用例重复执行（多登录一次被测站点、多等几十秒）。
+    实测还踩过更糟的：重构后那次执行因为环境抖动 / 站点数据变化没通过，
+    `_entry_refactor_broke` 判成结构性失败 -> **把这次有用的重构回滚掉了**，
+    后续用例照样 import 不到入口函数，问题反而是这次「验证」凭空制造出来的。
+
+    verify=True：只用于「脚本本来就在仓库里、本轮没有真跑过它」的既有前置脚本
+    （见 ensure_precondition_scripts 的 refactor 分支）。这时执行一次属于必要复核
+    而不是重复执行；结构性失败会把文件回滚成原样并返回 None
     （此时 prompt 会退化成「让 agent 自己 read_script 后重构」，不会留下坏脚本）。
 
     Returns:
-        入口函数名；无法安全重构 / 验证失败已回滚时返回 None。
+        入口函数名；无法安全重构 /（verify=True 时）验证失败已回滚则返回 None。
     """
     path = SCRIPTS_DIR / case.script_name
     try:
@@ -1634,13 +1840,20 @@ def add_reusable_entry(case: TestCase, label: str = "前置脚本") -> Optional[
         return None
 
     path.write_text(refactored, encoding="utf-8")
+    if not verify:
+        # 不执行脚本：本轮该用例已在真实浏览器里跑过一遍（或 agent 刚 run_script 复核过），
+        # 而这次改动只是「改名 + 加转发」，再跑一次就是重复执行同一条用例
+        print(f"{label} {case.script_name} 补入口函数：{test_name}(driver) -> {entry_name}(driver)"
+              f"（原 test 函数保留为转发包装）。语法自检通过、已落盘，**不执行脚本**"
+              f"（本轮该用例已真实跑过一遍，重构只是改名 + 加转发，再跑就是重复执行）")
+        return entry_name
+
     print(f"{label} {case.script_name} 补入口函数：{test_name}(driver) -> {entry_name}(driver)"
           f"（原 test 函数保留为转发包装），run_script 验证中 ...")
     output = run_script.invoke({"file_name": case.script_name})
     if _entry_refactor_broke(output):
         path.write_text(original, encoding="utf-8")
-        reason = next((line for line in reversed(output.strip().splitlines()) if line.strip()), output)
-        print(f"重构后执行未通过，已回滚 {case.script_name}：{reason.strip()}")
+        print(f"重构后执行未通过，已回滚 {case.script_name}：{_entry_refactor_reason(output)}")
         return None
     print(f"重构验证通过：{case.script_name} 现在可被其它脚本 "
           f"`from {script_module_name(path)} import {entry_name}` 复用")
@@ -1696,11 +1909,16 @@ def ensure_precondition_scripts(
             # 脚本不存在 -> 重新生成：把前置用例当独立用例跑完整链路（必要时开浏览器采集步骤）
             run_case_chain(ref.case, cases=cases, preparing=preparing + (case.name,),
                            depth=depth + 1)
-            # 模型未必按「代码规范」抽出入口函数，这时再用确定性重构补上
+            # 模型未必按「代码规范」抽出入口函数，这时再用确定性重构补上。
+            # verify 保持默认 False：这条前置用例刚刚在第一环真实跑过一遍，
+            # 重构后再执行一次就是把同一条用例重复跑（多登录一次被测站点）
             if not find_reusable_entry(ref.script_path):
                 add_reusable_entry(ref.case)
         else:
-            add_reusable_entry(ref.case)
+            # refactor：脚本本来就在仓库里、本轮没有真跑过它 -> 这次执行是必要复核，
+            # 不是重复执行；它是后续 N 条用例都要 import 的共享前置，重构坏了必须
+            # 当场回滚，而不是带病复用、等主用例失败时才暴露
+            add_reusable_entry(ref.case, verify=True)
 
     return resolve_preconditions(case, cases)
 
@@ -1750,8 +1968,12 @@ def run_case_chain(
     # test_xxx(driver) 里（实测「行政区域 / 区域名称」就是这样），那样别的脚本没法
     # `from src.web.scripts.行政区域_区域名称 import region_names`。这里用与前置脚本
     # 完全相同的**确定性重构**补入口函数（ast 定位 + 按行改名 + 追加转发包装 +
-    # run_script 验证，结构性失败自动回滚），不交给模型重写整个文件；
-    # 脚本已经是「入口函数 + test_ 转发」形态时是 no-op（不额外跑浏览器）。
+    # ast.parse 语法自检），不交给模型重写整个文件；脚本已经是「入口函数 + test_ 转发」
+    # 形态时是 no-op。
+    # verify 必须保持默认 False（不执行脚本）：走到这里说明第二环刚刚结束 —— 要么本轮
+    # 用第一环真实执行的步骤新生成了脚本（用例已在浏览器里跑过一遍），要么 agent 已经
+    # run_script 复核过既有脚本。两种情况再执行一次都是重复执行（多登录一次被测站点）；
+    # 更糟的是那次执行若因环境抖动失败，_entry_refactor_broke 会把这次有用的重构回滚掉。
     if target_script_exists(case):
         add_reusable_entry(case, label="目标脚本")
     return answer
@@ -1772,17 +1994,65 @@ def codegen_input(case: TestCase = CASE) -> str:
         """
 
 
+# `--help` 打印的用法说明。手写 argv 解析没有 argparse 的自动帮助，这份文本就是唯一的
+# 对外说明书，故按「用例范围 / 采集与前置 / 日志 / 环境变量 / 示例」分组，并把每个开关的
+# 同义写法都列全（少写一个别名，用户就会以为不支持）。
+USAGE = """用法：python src/web/generate_autoweb.py [开关]
+
+不带任何用例开关时，默认顺序跑用例文档里的**全部**用例（文档里有几条就跑几条）。
+
+用例范围：
+    --case <名称>              只跑指定用例（支持 `行政区域/区域名称`、末级标题如 `区域名称1`）
+    --all-cases, --all         顺序跑全部用例（与默认行为一致，写出来只为显式表达）
+    --first-case, --first      只跑文档里的第一条用例（旧默认行为，调试单条时用）
+    --list-cases, --list       只打印用例清单（用例名/标题层级/脚本名/前提条件依赖），不调大模型
+    --case-file <md>           换一份用例文档（相对路径按仓库根目录解析）
+
+采集与前置：
+    --force-collect            忽略步骤缓存（src/web/.steps/*.steps.json），重新开浏览器采集真实步骤
+    --no-deps                  不自动准备前置脚本，等价于 SKIP_PRECONDITION=1
+                               同义写法：--no-precondition / --skip-precondition
+
+日志：
+    --quiet, --no-debug        只留业务 print 与最终答案，等价于 LANGCHAIN_DEBUG=0
+    --debug                    打开调试日志（默认已打开，写出来只为显式表达）
+    --debug-events=<事件>      指定打印哪几类 tracer 事件：all / llm / tool / chain 及其组合
+                               如 --debug-events=all、--debug-events=chain,tool
+    --hide-debug-events=<事件> 在默认基础上再隐藏某几类，如 --hide-debug-events=llm/end
+
+环境变量：
+    WEB_TESTCASE_FILE 用例文档    WEB_TESTCASE 用例名    FORCE_COLLECT 强制重采
+    SKIP_PRECONDITION 跳过前置    LANGCHAIN_DEBUG / LANGCHAIN_DEBUG_EVENTS 日志开关
+
+示例：
+    python src/web/generate_autoweb.py                     # 文档里的全部用例
+    python src/web/generate_autoweb.py --case 区域名称1     # 只跑一条（末级标题即可匹配）
+    python src/web/generate_autoweb.py --first-case        # 只跑第一条
+    python src/web/generate_autoweb.py --list-cases        # 先看有哪些用例
+    python src/web/generate_autoweb.py --force-collect --quiet
+"""
+
+
+def print_usage() -> None:
+    """打印 USAGE（`--help` / `-h` 的唯一出口，不碰浏览器也不调大模型）。"""
+    print(USAGE)
+
+
 def main() -> None:
     """完整链路：准备前置脚本 ->（仅在脚本缺失时）跑浏览器 agent 收集真实步骤 -> 代码生成 agent 落盘/执行/修复。
 
     用例来自 markdown 文档（默认 src/web/testcase/home_page.md），用例名 / 脚本名 /
     测试步骤 / 预期结果都由文档派生，见文件顶部「用例参数化」那段注释。
+    **不带任何用例开关时，默认顺序跑文档里的全部用例**（`# 1. 首页登录`、
+    `# 2. 行政区域 / ## 2.1 区域名称1`……文档里有几条就跑几条，一条都不会漏）。
     可用开关：
         --case <名称>     只跑指定用例（支持 `行政区域/区域名称`、末级标题等写法）
-        --all-cases       顺序跑文档里的全部用例
+        --all-cases       顺序跑文档里的全部用例（与默认行为一致，写出来只为显式表达）
+        --first-case      只跑文档里的第一条用例（旧默认行为，调试单条时用）
         --list-cases      只打印用例清单（用例名 / 标题层级 / 脚本名 / 前提条件依赖），不调用大模型
         --case-file <md>  换一份用例文档（相对路径按仓库根目录解析）
         --no-deps         不自动准备前置脚本（见下），等价于 SKIP_PRECONDITION=1
+        --help, -h        打印用法说明后退出（不开浏览器、不调大模型，见 USAGE）
 
     前提条件（前置用例）的处理是本轮迭代的重点：像 `行政区域_区域名称` 的前提条件写着
     「首页登录」，开跑前会先看 `src/web/scripts/首页登录.py`——
@@ -1792,12 +2062,17 @@ def main() -> None:
     详见 ensure_precondition_scripts 与文件里「前提条件（前置用例）」那段注释。
 
     脚本已存在时第一环会被跳过、脚本不存在但命中步骤缓存时也不会打开浏览器
-    （见 resolve_steps），于是「一次运行只登录一次」：登录只发生在 run_script 执行
-    脚本时。需要重新采集步骤（页面改版、想重建脚本）请加 --force-collect，
+    （见 resolve_steps），于是「一次运行只登录一次」：脚本不存在时登录只发生在第一环采集，
+    脚本已存在时登录发生在 run_script 复核那一次。
+    需要重新采集步骤（页面改版、想重建脚本）请加 --force-collect，
     或设置环境变量 FORCE_COLLECT=1。
 
+    第二环的 write_script **只做「语法检查 -> 落盘」，不会执行脚本**：本轮步骤已在真实
+    浏览器里跑通过一遍（含断言），落盘后再跑一次等于把同一条用例重复执行（多登录一次
+    被测站点、多烧一轮 LLM）。run_script 只用于「脚本已存在时的复核」与「修复之后的确认」。
+
     控制台日志**默认打开**：会打印 agent 步骤行（「> Entering new AgentExecutor
-    chain...」「Invoking: `run_script` with ...」「> Finished chain.」）与 llm / tool
+    chain...」「Invoking: `write_script` with ...」「> Finished chain.」）与 llm / tool
     两类 tracer 日志（[llm/start] 发给模型的 prompt、[llm/end] 模型返回、
     [tool/start] 工具入参、[tool/end] 工具返回值）；chain 类日志默认隐藏，
     加 --debug-events=all 可以一并显示。想要干净输出（只有业务 print 与最终答案）
@@ -1808,6 +2083,12 @@ def main() -> None:
     这样其他模块可以 `from src.web.generate_autoweb import persist_and_verify`
     单独验证第二环，而不会在 import 时就拉起浏览器。
     """
+    if _cli_flag(*HELP_FLAGS):
+        # 手写 argv 解析没有 argparse 的自动帮助：不在这里拦住，`--help` 会被静默忽略、
+        # 紧接着就跑起完整流水线（开浏览器 + 调大模型）。放在最前面，先于 --list-cases。
+        print_usage()
+        return
+
     if _cli_flag(*LIST_CASES_FLAGS):
         # 纯本地能力：只解析 md（+ ast 解析已有脚本找入口函数）并打印清单，
         # 不构造任何 agent 调用（也就不产生 token 费用）

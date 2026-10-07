@@ -19,7 +19,11 @@
            模型既看不到文件系统，也跑不了 pytest。
 
     这里把「列目录 / 读 / 写 / 跑」做成工具，交给代码生成 agent 自主调用，
-    形成「生成 -> 落盘 -> 执行 -> 失败则修复」的闭环。
+    形成「生成 -> 落盘 -> （按需）执行 -> 失败则修复」的闭环。
+    注意 write_script **只落盘、不执行**：本轮要落成脚本的那条用例，第一环已经在真实
+    浏览器 / 设备上完整跑通过一遍（步骤 json 就是那次执行的产物），落盘后再自动跑一遍
+    等于把同一条用例重复执行（web 多登录一次站点、app 多连一次设备）。执行验证只在
+    「本轮没有真跑过该用例」时由 agent 显式调用 run_script（详见文件顶部那段注释）。
     （注意：承载这些工具的 agent 必须用原生 function calling，即
     `create_openai_tools_agent`；structured chat agent 要求模型把 action_input 以
     JSON 文本输出，write_script 的多行 code 参数会把它打崩，详见 generate_autoweb.py。）
@@ -71,6 +75,23 @@ MAX_RUN_OUTPUT = 4000
 DEFAULT_RUN_TIMEOUT = 180
 # 向后兼容：旧代码 import 过这个名字
 RUN_TIMEOUT = DEFAULT_RUN_TIMEOUT
+
+# write_script **无条件只做「语法自检 -> 落盘」**：没有任何开关、环境变量、参数或领域
+# 例外能让它顺带执行脚本（历史反复：曾一度改成「保存即验证」并留了 AUTO_VERIFY_ON_WRITE
+# / SCRIPT_AUTO_VERIFY 开关，实测更糟，已全部撤除；这里把结论写死，避免以后又被加回去）。
+# 这条约定由 __main__ 自测里的 canary 脚本**机械守住**：写一个「一旦被执行必然留下输出」
+# 的脚本，回执里若出现执行痕迹，自测当场 AssertionError。
+#
+# 为什么不在保存后自动跑一遍 pytest：这条用例在本轮**已经被真实执行过一次**了 ——
+# 第一环的浏览器 agent 正是照着测试步骤把 open / send_keys / click / assert_contains
+# 全部跑通（含断言）之后，才把步骤 json 交给第二环生成脚本的；脚本里的选择器逐条来自
+# 那次真实执行。落盘后再自动执行一遍，等于把同一条用例重复跑一次：
+#     - web 领域要多登录一次被测站点（多 3~5 秒 + 一次真实会话，还可能触发风控）；
+#     - app 领域要重连一次设备 / 重启 App；
+#     - 换来的信息量几乎为零（失败也只可能是环境抖动，反而诱导 agent 去改正确的脚本）。
+# 所以「执行验证」只在**本轮没有真跑过该用例**时才需要，由 agent 显式调用 run_script：
+#     1. 目标脚本已存在（第一环跳过采集）时的复核；
+#     2. 复核发现脚本步骤失败、write_script 修复写回之后的确认。
 
 # 跨领域通用的「脚本步骤失败」特征：出现这些就说明是脚本/环境问题，必须修脚本，
 # 不能当成「纯断言失败」（两者的处置指令完全相反）。
@@ -305,7 +326,7 @@ _FIX_HINT_BASE = (
     "请判断失败类型后决定下一步：\n"
     "- 脚本步骤失败（定位不到元素 / 会话或请求建立失败 / 等待超时 / 选择器或字段写错 / "
     "导入错误 / 语法错误）：先调用 read_script 读取当前脚本，再用 write_script 写入"
-    "修复后的**完整**代码，然后重新 run_script（最多修复 2 轮）；\n"
+    "修复后的**完整**代码，然后重新 run_script 确认（最多修复 2 轮）；\n"
     "- 断言失败（assert 不成立）：脚本本身能跑通，**不要**修改脚本，"
     "直接在 Final Answer 中说明断言结果。"
 )
@@ -535,11 +556,22 @@ def _read_script(target: ScriptTarget, file_name: str) -> str:
 
 
 def _write_script(target: ScriptTarget, file_name: str, code: str) -> str:
-    """把生成的代码写入该领域的脚本目录，写前做语法自检。
+    """把生成的代码写入该领域的脚本目录：**无条件**只做「语法自检 -> 落盘」，不执行脚本。
+
+    这里没有任何开关 / 环境变量 / 参数能让本函数顺带跑一遍脚本 —— 唯一的执行入口是
+    agent 显式调用 run_script（见 _run_script），且本函数体内也不该出现 subprocess。
 
     语法自检（compile）是关键兜底：模型输出的代码若被解释性文字污染，
     这里立刻以 Observation 形式反馈行号与原因，agent 可当轮重写，
-    而不是等到 run_script 起完浏览器 / 连完设备才失败。
+    而不是等到执行时起完浏览器 / 连完设备才失败。
+
+    为什么落盘后不顺手跑一遍验证（完整理由见文件顶部「write_script 只做语法自检 -> 落盘」
+    那段注释）：本轮的步骤 json 来自第一环在真实浏览器 / 设备上的完整执行（含断言），
+    脚本里的选择器逐条都是刚刚验证过的；落盘后再执行一遍就是把同一条用例重复跑一次 ——
+    web 领域要多登录一次被测站点、app 领域要重连一次设备，信息量几乎为零，
+    还会因为环境抖动诱导 agent 去改本来正确的脚本。
+    所以回执里明确告诉 agent：新生成的脚本不要再调 run_script 重复执行；
+    run_script 只用于「本轮没有真跑过该用例」的场景（脚本已存在时的复核、修复后的确认）。
     """
     target, redirected = _effective_target(target, file_name)
     path = _resolve_script_path(target, file_name)
@@ -561,7 +593,11 @@ def _write_script(target: ScriptTarget, file_name: str, code: str) -> str:
     normalized = "" if path.name == (file_name or "").strip() else f"（入参已归一化为 {path.name}）"
     return (f"脚本已保存：{path}{normalized}{redirected}（{len(cleaned.splitlines())} 行，"
             f"{len(cleaned)} 字符）。{_fstring_hint(cleaned)}"
-            f"接下来请调用 run_script 执行验证")
+            f"语法检查已通过。本工具**只落盘、不执行**，新生成的脚本也**不需要**再调用 "
+            f"run_script 重复验证 —— 本轮步骤已在真实环境里完整跑通过一遍，"
+            f"再跑一次等于把同一条用例重复执行（多登录一次被测站点 / 多连一次设备）。"
+            f"只有「脚本原本就存在、本轮没有重新采集步骤」或「你刚用 write_script 修复过脚本」"
+            f"这两种情况，才需要调用 run_script 验证。")
 
 
 def _is_assertion_failure(target: ScriptTarget, output: str) -> bool:
@@ -595,6 +631,14 @@ def _run_script(target: ScriptTarget, file_name: str) -> str:
 
     失败分类是这里的关键：exit code 5（未收集到用例）、超时、断言失败、步骤失败，
     给 agent 的下一步指令完全不同，笼统返回一句「失败」只会让它瞎改。
+
+    什么时候才该调用（write_script 只落盘不执行，理由见文件顶部那段注释）：
+        1. 目标脚本**原本就存在**、本轮没有重新采集步骤 -> 复核它是否仍然可用；
+        2. 复核发现脚本步骤失败、用 write_script 写回修复代码之后 -> 确认修复生效；
+        3. 仓库代码重构**既有**脚本后的复核（generate_autoweb.add_reusable_entry(verify=True)，
+           只用于本轮没有真跑过的既有前置脚本；刚生成 / 刚跑过的脚本一律不执行）。
+    本轮刚由步骤 json 生成的新脚本**不要**再跑一遍：那些步骤第一环已在真实浏览器 /
+    设备上完整执行过（含断言），重复执行只会多登录一次被测站点、多连一次设备。
     """
     path = _resolve_script_path(target, file_name)
     if not path.is_file():
@@ -668,12 +712,15 @@ def build_bound_tools(target: Union[str, ScriptTarget]) -> list[BaseTool]:
         _as_tool(_read, "read_script",
                  f"读取{where}下指定脚本（如 ***.py）的完整内容；修复脚本前必须先调用它"),
         _as_tool(_write, "write_script",
-                 f"把{bound.stack}的自动化测试代码保存到{where}下的 file_name 文件中。"
+                 f"把{bound.stack}的自动化测试代码保存到{where}下的 file_name 文件中"
+                 f"（只做语法检查 + 落盘，**不会执行脚本**）。"
                  f"code 必须是完整可运行的 Python 代码（新建与修复都用它整体覆盖写入）；"
-                 f"写入前会做语法检查，语法错误以 Observation 返回，需修正后重新调用"),
+                 f"写入前会做语法检查，语法错误以 Observation 返回，需修正后重新调用。"
+                 f"刚由本轮真实步骤生成的脚本，保存后即完成，不要再调用 run_script 重复执行"),
         _as_tool(_run, "run_script",
-                 f"用 {bound.runner} 执行{where}下的指定脚本，返回执行是否通过与失败摘要，"
-                 f"用于验证脚本可用性"),
+                 f"用 {bound.runner} 执行{where}下的指定脚本，返回执行是否通过与失败摘要。"
+                 f"只用于「本轮没有真实执行过该用例」的场景：目标脚本原本就存在时复核、"
+                 f"或用 write_script 修复脚本之后确认；刚生成的新脚本不要重复执行一遍"),
     ]
 
 
@@ -713,12 +760,16 @@ def build_generic_tools() -> list[BaseTool]:
         _as_tool(_read, "read_script",
                  f"读取指定领域脚本的完整内容；修复脚本前必须先调用它。{target_desc}"),
         _as_tool(_write, "write_script",
-                 f"把自动化测试代码保存到指定领域的脚本目录下。{target_desc}。"
+                 f"把自动化测试代码保存到指定领域的脚本目录下（只做语法检查 + 落盘，"
+                 f"**不会执行脚本**）。{target_desc}。"
                  f"code 必须是完整可运行的 Python 代码（新建与修复都用它整体覆盖写入）；"
-                 f"写入前会做语法检查，语法错误以 Observation 返回，需修正后重新调用"),
+                 f"写入前会做语法检查，语法错误以 Observation 返回，需修正后重新调用。"
+                 f"刚由本轮真实步骤生成的脚本，保存后即完成，不要再调用 run_script 重复执行"),
         _as_tool(_run, "run_script",
                  f"执行指定领域脚本目录下的脚本（pytest 领域用 pytest 跑），"
-                 f"返回执行是否通过与失败摘要。{target_desc}"),
+                 f"返回执行是否通过与失败摘要。只用于「本轮没有真实执行过该用例」的场景："
+                 f"目标脚本原本就存在时复核、或用 write_script 修复脚本之后确认；"
+                 f"刚生成的新脚本不要重复执行一遍。{target_desc}"),
     ]
 
 
@@ -750,12 +801,47 @@ if __name__ == "__main__":
     # 1) 三个内置领域各自绑定一套工具，落点互不干扰（分别落在 web/api/app 的 scripts 下）
     # 自测块里的变量统一用 _xxx / xxx_tools 命名：`if __name__` 块是模块级作用域，
     # 用 target/key 这类名字会变成全局变量，与工具函数的同名形参产生遮蔽告警。
+    # write_script 的回执只有「脚本已保存 + 语法检查已通过」，**不含任何执行结论** ——
+    # 这就是「只落盘不执行」：落盘不会触发 pytest（本轮用例已在真实环境跑过一遍，
+    # 重复执行只会多登录一次站点 / 多连一次设备）；执行验证由随后的 run_script 单独完成。
     for domain_key in ("web", "api", "app"):
         bound_tools = {t.name: t for t in build_script_tools(domain_key)}
         smoke_name = f"smoke_{domain_key}.py"
-        print(bound_tools["write_script"].invoke({"file_name": smoke_name, "code": SMOKE}))
+        saved_receipt = bound_tools["write_script"].invoke(
+            {"file_name": smoke_name, "code": SMOKE})
+        print(saved_receipt)
+        # 守住「write_script 不执行脚本」这条约定：回执里一旦出现执行结论，
+        # 说明有人把自动验证又加回了 _write_script（那会让每条用例落盘后被重复跑一遍）
+        assert "exit code" not in saved_receipt, \
+            "write_script 不该执行脚本：回执里出现了执行结论"
         print(bound_tools["list_scripts"].invoke({}))
         print(bound_tools["run_script"].invoke({"file_name": smoke_name}))
+
+    # 1b) canary：机械守住「write_script 无条件不执行脚本」这条约定。
+    # 这个脚本一旦被执行必然在 stderr 打出 CANARY_EXECUTED 并抛 boom_canary，
+    # 因此回执里出现任何一个执行痕迹，都说明有人在 _write_script 里加回了自动执行验证
+    # （那会让每条用例在第一环真跑过一遍之后、落盘时又被重复跑一遍：多登录一次站点 /
+    #  多连一次设备）。文件名用 smoke_ 前缀，第 5 步的清理规则会顺带删掉它。
+    CANARY = ("import sys\n"
+              "\n"
+              "\n"
+              "def test_canary():\n"
+              "    print('CANARY_EXECUTED', file=sys.stderr)\n"
+              "    raise RuntimeError('boom_canary')\n")
+    canary_tools = {t.name: t for t in build_script_tools("web")}
+    canary_receipt = canary_tools["write_script"].invoke(
+        {"file_name": "smoke_canary.py", "code": CANARY})
+    for executed_marker in ("CANARY_EXECUTED", "boom_canary", "exit code", "执行通过", "执行失败"):
+        assert executed_marker not in canary_receipt, \
+            f"write_script 不该执行脚本：回执里出现了执行痕迹 {executed_marker!r}"
+    print(canary_receipt.splitlines()[0])
+    # 对照组：同一个脚本交给 run_script 就必须真的被执行，
+    # 否则 canary 本身失效（比如脚本没落盘），上面那组断言就成了假绿
+    canary_run_receipt = canary_tools["run_script"].invoke({"file_name": "smoke_canary.py"})
+    assert "boom_canary" in canary_run_receipt, \
+        "run_script 应当真的执行脚本：没看到 canary 抛出的 boom_canary"
+    print("canary 对照通过：run_script 真的执行了它（看到 boom_canary），"
+          "而 write_script 落盘时没有")
 
     # 2) 多领域模式：工具带 target 参数，且支持技术栈别名（requests->api、appium->app）
     generic_tools = {t.name: t for t in build_script_tools()}
