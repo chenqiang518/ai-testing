@@ -148,6 +148,17 @@ def build_options(app_activity: Optional[str] = None,
     options.no_reset = bool(overrides.pop("no_reset", caps["no_reset"]))
     options.new_command_timeout = int(overrides.pop("new_command_timeout",
                                                     caps["new_command_timeout"]))
+    # forceAppLaunch 默认打开。UiAutomator2 的默认值是 false：app 已在前台时建 session
+    # 只把它 bring to front，**不会**回到 appActivity —— 于是上一条用例（或上一次失败
+    # 中断）停在的子页面成了下一条用例的起点。实测设置 app 停在 .SubSettings 时，脚本
+    # 第一步就找不到首页的「更多连接」，报错长得像「app 改版了 / 用例文案不对」，完全
+    # 指不到「起点不是首页」这个真因，排查成本极高。测试必须从确定状态开始，所以每次建
+    # session 都强制重启到 appActivity；no_reset 仍是 True，app 数据与登录态不受影响
+    # （只是回到入口 activity）。调试时想保留 app 当前界面：APP_FORCE_APP_LAUNCH=0。
+    force_launch = overrides.pop("force_app_launch", None)
+    if force_launch is None:
+        force_launch = _env_bool("APP_FORCE_APP_LAUNCH", "true")
+    options.set_capability("appium:forceAppLaunch", bool(force_launch))
     for key, value in overrides.items():
         options.set_capability(key, value)
     return options

@@ -103,7 +103,16 @@ from src.app.app_framework import (
     DEFAULT_APP_PACKAGE,
     resolve_appium_server,
 )
-from src.app.appium_tools import TOOL_NAMES, app, tools
+from src.app.appium_tools import (
+    TOOL_NAMES,
+    WORDING_REJECTION_PREFIX,
+    app,
+    bind_case_wording,
+    extend_case_wording,
+    step_input_offenders,
+    tools,
+    unbind_case_wording,
+)
 from src.utils.debug_events import DebugEventFilter
 from src.utils.hub_prompt import pull_prompt
 from src.utils.langchain_debug import (
@@ -348,7 +357,7 @@ def _codegen_parsing_error(error: BaseException) -> str:
         常见原因：字符串里嵌了未转义的双引号（如 assert \"省电\" in text）。
         请重新输出同一次工具调用，并遵守：字符串内部的双引号写成 \\\"，换行写成 \\n，
         不要出现裸控制字符。
-        """
+        """,
         # "上一次 Action Input 不是合法 JSON，工具没有被执行（脚本尚未写盘）。",
         # "常见原因：字符串里嵌了未转义的双引号（如 assert \"省电\" in text）。",
         # "请重新输出同一次工具调用，并遵守：字符串内部的双引号写成 \\\"，换行写成 \\n，"
@@ -915,6 +924,48 @@ def build_precondition_steps(refs: Sequence[PreconditionRef]) -> list[dict[str, 
     return steps
 
 
+def case_wording_sources(case: Optional[TestCase], refs: Sequence[PreconditionRef]) -> list[str]:
+    """组装「用例文案账本」的原文来源，喂给 appium_tools.bind_case_wording。
+
+    账本 = 本用例原文 + matched 前置用例原文。两者缺一不可：只放本用例的话，
+    前置用例（如「首页登录」）步骤里的文案会被判成越权，前置操作全被拦死。
+
+    用 TestCase.render() 而不是自己拼字段：它已经把用例名 / 标题层级 / 前提条件 /
+    测试步骤 / 预期结果全渲染出来了，而这几处正是「合法文案」的全部出处。
+    前置步骤缓存里的 locator 可能比 md 原文更具体（原文写「登录」而 locator 用「登录/注册」），
+    那部分由 collect_steps_on_device 用 extend_case_wording 追加。
+    """
+    texts: list[str] = []
+    for item in (case, *(ref.case for ref in refs if ref.is_matched and ref.case is not None)):
+        if item is not None:
+            texts.append(item.render())
+    return texts
+
+
+def steps_wording_offenders(steps: Sequence[Mapping[str, Any]]) -> list[str]:
+    """扫一遍采集到的步骤，找出「真的执行了、但用例原文里没有的中文文案」（保序去重）。
+
+    工具层已经在执行前拦了（appium_tools._wording_rejection），这里再扫一道是**门禁**：
+      1. 账本未生效的路径（老缓存、别人手工塞进 .steps 的 json、APP_STRICT_WORDING=0）也能被挡住；
+      2. 模型被拒绝后可能改用 resource-id 去点「更多设置」那个控件 —— locator 里没有中文，
+         工具层与这道门禁都抓不到，但只要它留下了任何越权中文字面量，整轮就不进第二环，
+         不会变成一份「跑通了但不是这条用例」的脚本。
+
+    **被文案门禁拦下的 failed 步骤不计入**：那种调用从未真正操作设备，模型被拦后
+    改回原文文案跑通了就是一条好轨迹，不该因为它试探过一次就整轮作废。
+    """
+    offenders: list[str] = []
+    for step in steps:
+        if str(step.get("tool", "")).startswith("#"):
+            continue  # 占位步骤（# step / # precondition）的 input 是步骤原文，不是工具入参
+        if step.get("failed") and WORDING_REJECTION_PREFIX in str(step.get("reason", "")):
+            continue
+        for item in step_input_offenders(step.get("input", "")):
+            if item not in offenders:
+                offenders.append(item)
+    return offenders
+
+
 def build_query(case: Optional[TestCase], launch: AppLaunch,
                 precondition_steps: Optional[list[dict[str, Any]]] = None) -> str:
     """组装第一环的执行指令：启动参数 + 前置步骤 + 本用例步骤 + App 定位规范。
@@ -928,13 +979,14 @@ def build_query(case: Optional[TestCase], launch: AppLaunch,
     else:
         steps_text = "\n".join(f"{index}. {step}" for index, step in enumerate(case.steps, 1))
     lines: list[str] = [
-        "你是一个 app 自动化测试工程师，技术栈为 pytest + Appium（Android / UiAutomator2）。",
-        "接下来请在**真机/模拟器上真实执行**下面这条测试用例，每一步都以上一步执行后的界面为准：",
-        "",
-        f"测试用例 -> {case.name if case else default_script_name()[:-3]}",
-        f"被测 app：{launch.describe()}",
-        "",
-        "【必须严格按顺序执行的动作】",
+        f"""你是一个 app 自动化测试工程师，技术栈为 pytest + Appium（Android / UiAutomator2）。
+        接下来请在**真机/模拟器上真实执行**下面这条测试用例，每一步都以上一步执行后的界面为准：
+        
+        测试用例 -> {case.name if case else default_script_name()[:-3]}
+        被测 app：{launch.describe()}
+        
+        【必须严格按顺序执行的动作】
+        """
     ]
     ordered: list[dict[str, Any]] = [*build_launch_steps(case, launch)]
     if precondition_steps:
@@ -955,35 +1007,61 @@ def build_query(case: Optional[TestCase], launch: AppLaunch,
         else:
             lines.append(f"{index}. {tool}({json.dumps(item.get('input', {}), ensure_ascii=False)}){note}")
     lines.extend([
-        "",
-        "【测试步骤原文】",
-        steps_text,
-        "",
-        "【Appium 定位规范（务必遵守，否则一定失败）】",
-        "1. 拼任何定位表达式之前，先调 get_page_source 拿当前界面的控件层级摘要；",
-        "   摘要每行形如 <TextView id=\"com.android.settings:id/title\" text=\"省电与电池\" clickable bounds=\"...\">，",
-        "   其中的 text / id(resource-id) / desc(content-desc) 才是真实可用的定位依据。",
-        "2. 定位表达式只支持这几种写法，**不支持 css 选择器，也不接受只给一段可见文本**：",
-        "     //*[contains(@text,'省电与电池')]                    按可见文本（最常用）",
-        "     //*[@resource-id='com.android.settings:id/title']     按 resource-id",
-        "     id=com.android.settings:id/title                      resource-id 简写",
-        "     acc=更多                                              content-desc（accessibility id）",
-        "     ui=new UiSelector().textContains(\"打印\")               UiAutomator 表达式",
-        "3. Android 列表里的条目默认不在可视区，直接 find 会失败：先 scroll_to_element 滚出来。",
-        "4. 点击报 element not interactable，说明命中的是不可点的子控件（如 TextView），",
-        "   改点它外层带 clickable 的父容器。",
-        "5. 「断言 XXX」用 assert_contains；「获取 XXX」用 get_text，再用 assert_contains 校验取值。",
-        "   **定位表达式和断言文本里只能用稳定文案，禁止写采集那一刻的具体数值** ——",
-        "   电量百分比 / 时间 / 未读数 / 版本号 下次运行就变了，写进去等于给脚本埋定时炸弹：",
-        "     ✗ get_text(//*[@text='剩余电量59%']) + assert_contains('剩余电量59%')",
-        "     ✓ get_text(//*[contains(@text,'剩余电量')]) + assert_contains('剩余电量')",
-        "   数值大小比较（如「断言电量大于0」）留给第二环写进 pytest 断言，本环只负责取到值并确认存在。",
-        "6. 「返回上一级页面」用 back，不要用 xpath 去点返回箭头。",
-        "7. 最后必须调 quit 释放设备。",
-        "",
-        "【结束条件】",
-        "全部步骤执行完（含 quit）后，输出 Final Answer，简要说明每步是否成功、"
-        "遇到的定位问题是怎么解决的。不要输出脚本代码 —— 写脚本是下一环的事。",
+        f"""
+        
+        【测试步骤原文】
+        {steps_text}
+        
+        【文案零改写（最高优先级；工具层已按用例原文做硬校验，违反会被直接拒绝执行）】
+        1. 定位表达式、断言文本、输入内容里的界面文案，必须**逐字**取自上面的测试步骤原文：
+            原文写「更多连接」就只能用「更多连接」，不得写成「更多设置」「更多」「链接」等任何变体。
+        2. 界面上存在原文没写的相近文案时（例如原文是「更多连接」、界面上只有「更多设置」），
+            **不允许**改点那个相近入口，也不允许自己去试「连接与共享」这类别的入口：
+            那是另一条用例的路径，即使一路点通了，采集到的步骤与最终生成的脚本也全是错的。
+        3. 找不到原文文案时的唯一正确处置（三步，走完就收尾，不要继续试探）：
+            a) get_page_source 核对当前界面，确认自己没有走错入口（走错了先 back 回去）；
+            b) scroll_to_element 用**原文文案**继续滚找（max_swipes 可以给到 10）；
+            c) 滚完仍没有 -> 判定该步骤失败：不再执行后续步骤，直接调用 quit 释放设备，
+                并在 Final Answer 里写明「界面缺少用例原文文案『X』，当前界面上最接近的是『Y』，
+                疑似 app 版本/机型不匹配，需人工确认用例文案或换机型后重跑」。
+        4. 断言文案同理，只能取自测试步骤原文 / 预期结果（如原文「断言页面中包含『系统打印服务』」）。
+        5. 允许自由选择的只有**定位方式**，不是文案：同一个原文文案可以写成
+            //*[contains(@text,'更多连接')]、//*[@text='更多连接']、ui=new UiSelector().textContains("更多连接")，
+            也可以改用 get_page_source 里查到的 resource-id / content-desc 去定位**同一个控件**；
+            但绝不允许把文案换成另一个控件上的文字。
+
+        【Appium 定位规范（务必遵守，否则一定失败）】
+        1. 拼任何定位表达式之前，先调 get_page_source 拿当前界面的控件层级摘要；
+            摘要每行形如 <TextView id=\"com.android.settings:id/title\" text=\"省电与电池\" clickable bounds=\"...\">，
+            其中的 text / id(resource-id) / desc(content-desc) 才是真实可用的定位依据。
+        2. 定位表达式只支持这几种写法，**不支持 css 选择器，也不接受只给一段可见文本**：
+            //*[contains(@text,'省电与电池')]                    按可见文本（最常用）
+            //*[@resource-id='com.android.settings:id/title']   按 resource-id
+            id=com.android.settings:id/title                    resource-id 简写
+            acc=更多                                              content-desc（accessibility id）
+            ui=new UiSelector().textContains(\"打印\")            UiAutomator 表达式
+        3. Android 列表里的条目默认不在可视区，直接 find 会失败：先 scroll_to_element 滚出来。
+        4. 点击报 element not interactable，说明命中的是不可点的子控件（如 TextView），
+            改点它外层带 clickable 的父容器。
+        5. 「断言 XXX」用 assert_contains；「获取 XXX」用 get_text，再用 assert_contains 校验取值。
+            **定位表达式和断言文本里只能用稳定文案，禁止写采集那一刻的具体数值** ——
+            电量百分比 / 时间 / 未读数 / 版本号 下次运行就变了，写进去等于给脚本埋定时炸弹：
+                ✗ get_text(//*[@text='剩余电量59%']) + assert_contains('剩余电量59%')
+                ✓ get_text(//*[contains(@text,'剩余电量')]) + assert_contains('剩余电量')
+            数值大小比较（如「断言电量大于0」）留给第二环写进 pytest 断言，本环只负责取到值并确认存在。
+        6. 「返回上一级页面」用 back，不要用 xpath 去点返回箭头。
+        7. 最后必须调 quit 释放设备。
+        
+        【失败也是合法结局（重要）】
+        找不到用例原文文案 -> 判定该步骤失败 -> 调用 quit -> Final Answer 报告缺失的文案。
+        这条路径同样是本次任务的**合格交付**：如实报告「界面上没有『更多连接』，只有『更多设置』」
+        远比点进「更多设置」凑出一串能跑通的步骤有价值。禁止为了「让步骤跑通」而替换文案，
+        也禁止在判定失败后继续试探其他入口 —— 每多试一次都在污染 .steps 缓存并烧掉迭代轮次。
+
+        【结束条件】
+        全部步骤执行完（含 quit）后，输出 Final Answer，简要说明每步是否成功、 
+        遇到的定位问题是怎么解决的。不要输出脚本代码 —— 写脚本是下一环的事。   
+        """,
     ])
     return "\n".join(lines)
 
@@ -1040,23 +1118,43 @@ def steps_blocking_reason(steps: Sequence[Mapping[str, Any]]) -> str:
          第二环拿不到任何操作步骤，只能凭空编。
       3. agent 滚动没找到目标就 quit 收尾（轨迹里只有导航类工具），第二环照着写出
          「scroll + assert 元素存在」的占位脚本 —— 见 _ACTION_TOOLS 的说明。
-    三类都表现为「白跑一轮真机 + 十几次模型调用」，所以在进第二环之前直接拦掉。
+      4. agent 找不到用例原文里的文案，就改用界面上「看起来相近」的文案继续跑
+          （实测当时的「更多连接_打印」：界面上没有「更多连接」，它改点「更多设置」、又试
+          「连接与共享」，一路点进不相干的页面，把 40 轮 max_iterations 烧光。
+           后续用 adb shell uiautomator dump 核实：那是**用例自身的笔误** —— 真机上这个
+           入口叫「更多连接」，setting.md 已按真实文案修正，用例名也随之变成
+           「更多连接_打印」。门禁本身保留：它拦的是「模型替人猜文案」这个动作 ——
+           猜对了也等于悄悄改掉了被测路径，猜错了就是一份跑得通但测错对象的脚本）。
+         这种轨迹最危险 —— 步骤齐全、没有报错、门禁 1~3 全过，第二环会老老实实写出
+         一份「跑通了、但测的是另一条用例」的脚本。工具层已在执行前拒绝这类调用，
+         这里再兜一道（见 steps_wording_offenders），拦住账本没生效的那些路径。
+    四类都表现为「白跑一轮真机 + 十几次模型调用」，所以在进第二环之前直接拦掉。
     """
     if not steps:
         return "本轮没有采集到任何步骤（agent 可能一次工具都没调成功）"
     real = [step for step in steps if not str(step.get("tool", "")).startswith("#")]
     if not real:
         return "本轮只有占位步骤，没有任何真实工具调用"
+    offenders = steps_wording_offenders(steps)
+    if offenders:
+        return (f"""步骤里出现了测试用例原文之外的界面文案：{'、'.join(offenders)}。
+            界面文案只能逐字取自用例原文，禁止替换成界面上看起来相近的入口
+            （原文「更多连接」≠ 界面「更多设置」）—— 跑通了也是在测另一条用例。
+            处置：删掉 src/app/.steps 下的对应缓存重新采集；若确认是 app 版本/机型与
+            用例文案不匹配，请把结论反馈给人工修用例，不要让 agent 猜文案。
+        """)
     tools_used = [str(step.get("tool", "")) for step in real]
     missing = [name for name in _REQUIRED_STEP_TOOLS if name not in tools_used]
     if missing:
-        return (f"缺少必需工具调用：{'、'.join(missing)}"
-                "（每条用例必须以 init 启动 app 开始、以 quit 释放设备结束）")
+        return (f"""缺少必需工具调用：{'、'.join(missing)}
+            （每条用例必须以 init 启动 app 开始、以 quit 释放设备结束）
+        """)
     if not any(name in _ACTION_TOOLS for name in tools_used):
-        return ("没有任何测试动作（click / send_keys / get_text / assert_contains 一个都没调用，"
-                f"本轮只调了 {'、'.join(dict.fromkeys(tools_used))}）—— 通常是滚动/查找没命中目标，"
-                "agent 就提前 quit 收尾了。请先用 get_page_source 或 "
-                "adb shell uiautomator dump 核对界面上的真实文案/控件 id，再重跑采集")
+        return (f"""没有任何测试动作（click / send_keys / get_text / assert_contains 一个都没调用，
+            本轮只调了 {'、'.join(dict.fromkeys(tools_used))}）—— 通常是滚动/查找没命中目标，
+            agent 就提前 quit 收尾了。请先用 get_page_source 或 
+            adb shell uiautomator dump 核对界面上的真实文案/控件 id，再重跑采集
+        """)
     if tools_used[0] != "init":
         return f"第一步是 {tools_used[0]} 而不是 init，说明 app 还没启动就开始操作了"
     return ""
@@ -1179,7 +1277,15 @@ def collect_steps_on_device(case: Optional[TestCase], launch: AppLaunch,
     说明文本用于「采集失败时告诉第二环发生了什么」，让它别拿空步骤硬写脚本。
     """
     log = logging.getLogger("app.collect")
-    query = build_query(case, launch, build_precondition_steps(refs))
+    precondition_steps = build_precondition_steps(refs)
+    # 往「用例文案账本」里追加前置步骤的渲染结果（本用例 / matched 前置用例的原文已由
+    # 第一环入口 app_execute_result 绑定）：前置用例缓存里的 locator 往往比 md 原文更具体
+    # （原文写「登录」而 locator 用「登录/注册」），不追加就会把已验证过的前置操作
+    # 误判成越权文案、整段前置被拦死。
+    # 账本的绑定/解绑统一由 app_execute_result 管，这里不碰生命周期 ——
+    # 采集结束后还要用同一个账本给 steps_blocking_reason 做门禁。
+    extend_case_wording(json.dumps(precondition_steps, ensure_ascii=False, default=str))
+    query = build_query(case, launch, precondition_steps)
     recorder = StepRecorder()
     global CURRENT_RECORDER
     CURRENT_RECORDER = recorder
@@ -1249,31 +1355,40 @@ def app_execute_result(_inputs: dict) -> str:
     用例 / 启动参数 / 前置解析结果一律读模块级 CURRENT_*（run_case_chain 在 invoke 前设好），
     不在这里重新解析：一是省掉一次重复的前置匹配，二是递归生成前置脚本时
     （allow_precondition=False）CURRENT_REFS 是空的，这里再解析就会把递归层数放穿。
+
+    「用例文案账本」的生命周期也在这里管：绑定要早于第一环的任何一次工具调用与
+    steps_wording_offenders 检查（未绑定时它们一律放行，等于门禁形同虚设），
+    解绑要晚于最后一次门禁检查，所以用 try/finally 把整段第一环包起来。
     """
     global CODEGEN_SKIP_REASON
     CODEGEN_SKIP_REASON = ""
     case, launch, refs = CURRENT_CASE, CURRENT_LAUNCH, CURRENT_REFS
-    steps, note = resolve_steps(case, launch, refs)
-    blocking = steps_blocking_reason(steps) if steps else (note or "本轮没有采集到步骤")
-    if blocking:
-        logging.getLogger("app.steps").warning("本轮步骤不可用，跳过代码生成：%s", blocking)
-        CODEGEN_SKIP_REASON = build_skip_message(blocking, case)
-        return ""
-    payload = [
-        {
-            "tool": step.get("tool", ""),
-            "input": step.get("input", ""),
-            "failed": bool(step.get("failed", False)),
-            "reason": step_failure_reason(step) if step.get("failed") else "",
-        }
-        for step in steps
-        if not str(step.get("tool", "")).startswith("#")
-    ]
-    log = logging.getLogger("app.steps")
-    log.info("交给第二环的步骤共 %d 条（其中失败 %d 条）%s",
-             len(payload), sum(1 for item in payload if item["failed"]),
-             f"；采集说明：{_short(note, 300)}" if note else "")
-    return json.dumps(payload, ensure_ascii=False)
+    bind_case_wording(*case_wording_sources(case, refs))
+    try:
+        steps, note = resolve_steps(case, launch, refs)
+        blocking = steps_blocking_reason(steps) if steps else (note or "本轮没有采集到步骤")
+        if blocking:
+            logging.getLogger("app.steps").warning("本轮步骤不可用，跳过代码生成：%s", blocking)
+            CODEGEN_SKIP_REASON = build_skip_message(blocking, case)
+            return ""
+        payload = [
+            {
+                "tool": step.get("tool", ""),
+                "input": step.get("input", ""),
+                "failed": bool(step.get("failed", False)),
+                "reason": step_failure_reason(step) if step.get("failed") else "",
+            }
+            for step in steps
+            if not str(step.get("tool", "")).startswith("#")
+        ]
+        log = logging.getLogger("app.steps")
+        log.info("交给第二环的步骤共 %d 条（其中失败 %d 条）%s",
+                 len(payload), sum(1 for item in payload if item["failed"]),
+                 f"；采集说明：{_short(note, 300)}" if note else "")
+        return json.dumps(payload, ensure_ascii=False)
+    finally:
+        # 账本是模块级全局态：留着会误伤后面不带用例的调试调用（以及下一条用例的采集）
+        unbind_case_wording()
 
 
 # ---------------------------------------------------------------------------
@@ -1311,82 +1426,93 @@ def _repair_illegal_tool_args(text: str) -> str:
     return text[:quote + 1] + fixed + '"' + text[end:]
 
 
-APP_FIXTURE_DOC = '''\
-# driver fixture 必须这样写（Appium / Android）：
-#   - 统一 import src.app.app_framework 里的 create_driver，**不要自己手拼 capabilities**：
-#     server 地址 / 设备 udid 由环境变量决定，写死在脚本里换台机器就跑不了。
-#   - 必须 yield 之后 quit：session 不释放会一直占着设备，后续用例全部起不来。
-import pytest
-from src.app.app_framework import (
-    create_driver, locate, locate_all, scroll_to, texts_of, page_text,
-)
+APP_FIXTURE_DOC = """# driver fixture 必须这样写（Appium / Android）：
+    - 统一 import src.app.app_framework 里的 create_driver，**不要自己手拼 capabilities**：
+        server 地址 / 设备 udid 由环境变量决定，写死在脚本里换台机器就跑不了。
+    - 必须 yield 之后 quit：session 不释放会一直占着设备，后续用例全部起不来。
+    import pytest
+    from src.app.app_framework import (
+        create_driver, locate, locate_all, scroll_to, texts_of, page_text,
+    )
+    
+    
+    @pytest.fixture
+    def driver():
+        driver = create_driver(app_activity="{app_activity}", app_package="{app_package}")
+        yield driver
+        driver.quit()
+    """
 
+APP_CODE_RULES = """App 脚本代码规范（务必遵守）：
+    1. 结构：业务步骤写在一个独立函数里（函数名用测试步骤的语义，如 check_battery），
+        test_* 函数只负责调它 + 断言；driver 由上面的 fixture 注入。
+    2. 定位：一律用 app_framework 的 locate / locate_all / scroll_to（内部已做
+        「显式等待 + 定位方式分流」），**不要**直接写 driver.find_element(by, expr)，
+        更不要自己算 AppiumBy —— 定位表达式原样照抄第一环验证过的那一份。
+        例外：第一环若用了 `@text='...'` **全等**匹配去取带动态值的文本（如「剩余电量」），
+        脚本里要改成 contains 前缀匹配（`//*[contains(@text,'剩余电量')]`）——
+        真机上的完整文本是「剩余电量59%」，全等匹配下次就取不到了。
+    3. 脚本必须**自包含**：用到 re / time / random 就要在文件头 import 它们。
+        write_script 会做未定义名检查并拒收（Observation 里给出行号），别指望 conftest 代劳。
+    4. 列表/长页面里的条目：先 scroll_to 拿到元素，**判空之后直接用返回的元素**点击，
+        不要滚完再 locate 一次（重复定位；滚动失败时只会得到一句 TimeoutException）：
+            item = scroll_to(driver, "//*[contains(@text,'省电与电池')]", max_swipes=15)
+            assert item is not None, '未能找到「省电与电池」设置项'
+            item.click()
+        不要用 sleep 兜底。
+    5. 取文本：定位表达式要指到**带文本的控件本身**，不要加 `//..` 去取父节点 ——
+        容器/父节点没有 text，texts_of 只会抛「都没有可读文本」。
+        texts_of / locate 取不到时是抛异常（不是返回空串），所以不需要再包一层判空。
+    6. 等待：统一用 locate/locate_all 的 timeout 参数（默认 10s）；
+        禁止 driver.implicitly_wait（会让 find_elements 判空也阻塞同样久，滚动循环慢 N 倍）。
+    7. 返回上一级：driver.back()，不要 xpath 去点返回箭头。
+    8. 每一步都要有中文注释说明它对应测试用例里的哪一步。
+    9. **界面文案零改写**：脚本里的定位文案 / 断言文案只能逐字取自测试用例原文
+        （上面 testcase_desc 的「测试步骤」「预期结果」），与第一环步骤 json 保持一致。
+        原文是「更多连接」时，禁止写成界面上看起来相近的「更多设置」，也禁止自己
+        「优化」成别的入口 —— 那测的就是另一条用例了。第一环若因找不到原文文案而失败，
+        在脚本对应位置写注释说明「采集时界面缺少文案『X』」并让断言如实失败，
+        不要为了让脚本跑绿去换一个文案。
+    """
 
-@pytest.fixture
-def driver():
-    driver = create_driver(app_activity="{app_activity}", app_package="{app_package}")
-    yield driver
-    driver.quit()
-'''
+APP_ASSERT_RULES = """断言规范：
+    1. 文本断言优先限定范围：texts_of(driver, "id=com.android.settings:id/dashboard_container")
+        比整页 page_text(driver) 可靠 —— 整页会混入状态栏/导航栏文本，容易误判通过。
+        确实需要整页判断时才用 page_text(driver)。
+    2. 断言失败信息里必须带上「实际取到的文本片段」，否则失败时根本不知道界面上有什么：
+            text = page_text(driver)
+            assert "系统打印服务帮助" in text, f"界面未包含「系统打印服务帮助」，实际片段：{text[:300]}"
+    3. 数值类断言（如「断言电量大于0」）：先用 locate 取控件文本，再 re 抽数字比较；
+        re.search 可能返回 None，**必须先判空再取值**，否则文本里没有数字时抛的是
+        AttributeError，而不是一条能看懂的断言失败：
+            raw = texts_of(driver, "//*[contains(@text,'剩余电量')]")
+            match = re.search(r"(\\d+)", raw)
+            assert match, f"没能从剩余电量文本里抽出数字，实际：{raw!r}"
+            level = int(match.group(1))
+            assert level > 0, f"剩余电量应大于 0，实际 {raw!r}"
+        抽不到数字要让断言失败并给出原文，不要静默跳过。
+    4. **动态数值不能照抄**：第一环采集时界面上是「剩余电量59%」，步骤里就可能留下
+        `get_text(//*[@text='剩余电量59%'])` / `assert_contains('剩余电量59%')` 这种快照值。
+        写进脚本等于定时炸弹（电量一变就红）。一律改写成稳定前缀 + 上面的抽数比较，
+        并按测试步骤原文的语义断言（原文说「断言电量大于0」，就不要断言「包含 59%」）。
+        同理适用于时间、未读数、版本号、剩余空间等一切会变的值。
+    5. **点击跳转后不要立刻取整页文本**：Android 的界面切换带动画 + 异步渲染，
+        紧跟在 click() 后面的 page_text(driver) 可能拿到空串（或上个界面的残留文本），
+        断言于是以「界面未包含 X，实际片段：''」的形式假失败 —— 看着像界面没这个文案，
+        其实是取早了。先用 locate 显式等目标页面的关键元素出现，再做整页断言：
+            locate(driver, "//*[contains(@text,'系统打印服务')]", timeout=15)
+            text = page_text(driver)
+            assert "系统打印服务" in text, f"界面未包含「系统打印服务」，实际片段：{text[:300]}"
+        第一环的 assert_contains 不带等待，它能通过往往只是因为 agent 在 click 之后
+        还调了 get_ui_summary 等工具、无意中给了页面渲染时间 —— 脚本里不能赌这个时间差。
+    6. 不要断言第一环没有验证过的内容（凭想象加的断言必然失败）。
+    """
 
-APP_CODE_RULES = '''\
-# App 脚本代码规范（务必遵守）：
-# 1. 结构：业务步骤写在一个独立函数里（函数名用测试步骤的语义，如 check_battery），
-#    test_* 函数只负责调它 + 断言；driver 由上面的 fixture 注入。
-# 2. 定位：一律用 app_framework 的 locate / locate_all / scroll_to（内部已做
-#    「显式等待 + 定位方式分流」），**不要**直接写 driver.find_element(by, expr)，
-#    更不要自己算 AppiumBy —— 定位表达式原样照抄第一环验证过的那一份。
-#    例外：第一环若用了 `@text='...'` **全等**匹配去取带动态值的文本（如「剩余电量」），
-#    脚本里要改成 contains 前缀匹配（`//*[contains(@text,'剩余电量')]`）——
-#    真机上的完整文本是「剩余电量59%」，全等匹配下次就取不到了。
-# 3. 脚本必须**自包含**：用到 re / time / random 就要在文件头 import 它们。
-#    write_script 会做未定义名检查并拒收（Observation 里给出行号），别指望 conftest 代劳。
-# 4. 列表/长页面里的条目：先 scroll_to 拿到元素，**判空之后直接用返回的元素**点击，
-#    不要滚完再 locate 一次（重复定位；滚动失败时只会得到一句 TimeoutException）：
-#       item = scroll_to(driver, "//*[contains(@text,'省电与电池')]", max_swipes=15)
-#       assert item is not None, '未能找到「省电与电池」设置项'
-#       item.click()
-#    不要用 sleep 兜底。
-# 5. 取文本：定位表达式要指到**带文本的控件本身**，不要加 `//..` 去取父节点 ——
-#    容器/父节点没有 text，texts_of 只会抛「都没有可读文本」。
-#    texts_of / locate 取不到时是抛异常（不是返回空串），所以不需要再包一层判空。
-# 6. 等待：统一用 locate/locate_all 的 timeout 参数（默认 10s）；
-#    禁止 driver.implicitly_wait（会让 find_elements 判空也阻塞同样久，滚动循环慢 N 倍）。
-# 7. 返回上一级：driver.back()，不要 xpath 去点返回箭头。
-# 8. 每一步都要有中文注释说明它对应测试用例里的哪一步。
-'''
-
-APP_ASSERT_RULES = '''\
-# 断言规范：
-# 1. 文本断言优先限定范围：texts_of(driver, "id=com.android.settings:id/dashboard_container")
-#    比整页 page_text(driver) 可靠 —— 整页会混入状态栏/导航栏文本，容易误判通过。
-#    确实需要整页判断时才用 page_text(driver)。
-# 2. 断言失败信息里必须带上「实际取到的文本片段」，否则失败时根本不知道界面上有什么：
-#       text = page_text(driver)
-#       assert "系统打印服务帮助" in text, f"界面未包含「系统打印服务帮助」，实际片段：{text[:300]}"
-# 3. 数值类断言（如「断言电量大于0」）：先用 locate 取控件文本，再 re 抽数字比较；
-#    re.search 可能返回 None，**必须先判空再取值**，否则文本里没有数字时抛的是
-#    AttributeError，而不是一条能看懂的断言失败：
-#       raw = texts_of(driver, "//*[contains(@text,'剩余电量')]")
-#       match = re.search(r"(\\d+)", raw)
-#       assert match, f"没能从剩余电量文本里抽出数字，实际：{raw!r}"
-#       level = int(match.group(1))
-#       assert level > 0, f"剩余电量应大于 0，实际 {raw!r}"
-#    抽不到数字要让断言失败并给出原文，不要静默跳过。
-# 4. **动态数值不能照抄**：第一环采集时界面上是「剩余电量59%」，步骤里就可能留下
-#    `get_text(//*[@text='剩余电量59%'])` / `assert_contains('剩余电量59%')` 这种快照值。
-#    写进脚本等于定时炸弹（电量一变就红）。一律改写成稳定前缀 + 上面的抽数比较，
-#    并按测试步骤原文的语义断言（原文说「断言电量大于0」，就不要断言「包含 59%」）。
-#    同理适用于时间、未读数、版本号、剩余空间等一切会变的值。
-# 5. 不要断言第一环没有验证过的内容（凭想象加的断言必然失败）。
-'''
-
-APP_ENTRY_DOC = '''\
-# 可复用入口（前置用例被别的用例 import 时必须满足）：
-#   - 业务步骤函数签名统一为 def <name>(driver): ...，不自己建/关 driver；
-#   - test_* 函数形如 def test_xxx(driver): <name>(driver)；
-#   - 这样其它脚本可以 `from src.app.scripts.<模块名> import <name>` 直接复用。
-'''
+APP_ENTRY_DOC = """可复用入口（前置用例被别的用例 import 时必须满足）：
+    - 业务步骤函数签名统一为 def <name>(driver): ...，不自己建/关 driver；
+    - test_* 函数形如 def test_xxx(driver): <name>(driver)；
+    - 这样其它脚本可以 `from src.app.scripts.<模块名> import <name>` 直接复用。
+    """
 
 
 # 第二环的任务模板。占位符除 {task} 外都由 codegen_prompt_inputs 组装；
@@ -1396,74 +1522,78 @@ APP_ENTRY_DOC = '''\
 # 模板用 PromptTemplate.from_template（str.format）渲染：除下面这些占位符外，
 # 模板里不要再出现裸花括号，需要字面量花括号时写成 {{}}。
 CODEGEN_TASK = """你是一个 app 自动化测试工程师，技术栈为 pytest + Appium（Android / UiAutomator2）。
-你的任务：把下面这次在真机上真实执行过的测试步骤，落成一个可重复运行的自动化测试脚本。
-脚本**已存在**时：read_script 读出来 + run_script **直接执行**复核，执行步骤失败
-（断言成功/失败不在判断范围内）就修复脚本，直到除断言之外的执行步骤全部成功；
-脚本是**本轮新生成**的：write_script 落盘即完成，不要再执行它 —— 上面的步骤已经在真机上
-把这条用例连断言完整跑通过一遍，落盘后再跑一次纯属重复执行（理由与要求见下面第 3 条）。
-
-{task}
-
-目标脚本：{scripts_dir} 目录下的 {script_name}
-被测 app：{app_launch}
-
-{testcase_desc}
-
-前提条件解析结果：
-{precondition_desc}
-
-{precondition_note}本次真实执行过的测试步骤（json 数组：tool 是工具名，input 是工具入参，
-failed=true 表示这一步当时失败了、reason 是失败原因）；
-其中的定位表达式都是当时在真机上真实存在、且已经验证可用的：
-
-{steps}
-
-{fixture_doc}
-{code_rules}
-{assert_rules}
-{entry_doc}
-必须严格按以下流程使用工具，不要臆测文件是否存在：
-1. 先调用 list_scripts，确认 {script_name} 是否已经存在；
-2. 已存在（上一轮生成过，本轮命中步骤缓存）：调用 read_script 读取内容，与上面的步骤 json
-   逐条对照，再调用 run_script **直接执行**复核，然后按执行结论分支处理：
-   a) 执行通过（exit code 0）-> 不必重写，直接给出 Final Answer；
-   b) **脚本执行步骤失败**（定位不到控件 / 等待超时 / 语法或导入错误 / 漏了测试步骤 /
-      定位表达式与本轮已验证的不一致 / 违反上面的代码规范 / 前置用例没有 import 复用）
-      -> 用 write_script 写入修复后的**完整**代码，然后再 run_script 确认，最多修复 2 轮，
-      直到除断言之外的执行步骤全部成功；
-   c) **断言成功/失败不在判断范围内**：纯断言失败（AssertionError，且输出里没有 appium /
-      定位 / 超时类异常）说明脚本本身跑得通，不要为了让断言变绿去改执行步骤，
-      在 Final Answer 里如实报告哪条断言失败、失败时实际取到的文本是什么即可；
-      唯一该改的断言缺陷是「照抄了采集那一刻的动态数值」（见上面的断言规范第 4 条）；
-   d) 同一个原因连续失败两次，说明不是改一行就能好的问题（多为设备/被测 app 状态），
-      立即停止修复并在 Final Answer 中说明，不要重复写入内容相同的代码；
-3. 不存在：按上面的「代码规范」生成完整脚本，调用 write_script 保存，**保存完就结束** ——
-   write_script 只做语法检查 + 未定义名检查 + 落盘，落盘即完成；保存之后也**不要**再调用
-   run_script 去跑它。原因：本轮的步骤 json 就是第一环在真机上把这条用例（含断言）完整跑通
-   后记录下来的，脚本里每个定位表达式都刚刚验证过；落盘后再执行一遍等于把同一条用例重复跑
-   一次（多起一次 Appium session、多占设备几十秒），信息量几乎为零，还可能因为设备状态抖动
-   把本来正确的脚本误判成有问题、进而改坏它。需要确认脚本可用性时，在 Final Answer 里提示
-   开发者自己执行：`python -m pytest {scripts_dir}/{script_name}`；
-4. 失败回执要按类型处置，不要一律当成脚本问题去改代码：
-   a) run_script 报环境类失败（Connection refused / Could not start a new session /
-      设备不在线 / InvalidSessionIdException）-> **不是脚本的问题**：不要为此改定位表达式，
-      直接在 Final Answer 里提示开发者启动 Appium server（默认 http://127.0.0.1:4723）、
-      用 `adb devices` 确认设备在线后重跑；
-   b) write_script 回执报「语法检查未通过」或「用到了从未导入 / 从未定义的名字」
-      -> 按回执给出的行号修正（通常是漏了 import re / from time import sleep）后重新写入；
-   c) 若发现步骤 json 里的定位表达式与测试步骤原文对不上（很可能是 app 改版、采集步骤已过期），
-      不要自己臆测新的 xpath / resource-id，直接在 Final Answer 中提示：用
-      `python src/app/generate_autoapp.py --testcase "{case_name}" --force-collect`
-      重新在真机上采集步骤；
-5. failed=true 的步骤：不要原样照抄进脚本。先判断 reason ——
-   若是「滚动不够/控件还没渲染」这类时序问题，脚本里用 scroll_to + locate(timeout=...) 解决；
-   若是「定位表达式本身错了」而后续步骤又用了新的表达式成功，就采用成功的那一个；
-   若这一步最终没跑通，在脚本对应位置写注释说明「此步在采集时失败：<reason>」，
-   并在 Final Answer 里明确报告，不要假装它成功。
-6. 结束后给出 Final Answer，说明：脚本绝对路径、执行结论（本轮新生成的写「已按第一环真实
-   执行过的步骤落盘，未重复执行」；复核已有脚本的写 执行通过 / 断言失败 / 修复了几轮、
-   修完是否已通过）、关键改动、以及有哪些步骤是采集时就失败因而需要人工确认的。
-"""
+    你的任务：把下面这次在真机上真实执行过的测试步骤，落成一个可重复运行的自动化测试脚本。
+    脚本**已存在**时：read_script 读出来 + run_script **直接执行**复核，执行步骤失败
+    （断言成功/失败不在判断范围内）就修复脚本，直到除断言之外的执行步骤全部成功；
+    脚本是**本轮新生成**的：write_script 落盘即完成，不要再执行它 —— 上面的步骤已经在真机上
+    把这条用例连断言完整跑通过一遍，落盘后再跑一次纯属重复执行（理由与要求见下面第 3 条）。
+    
+    {task}
+    
+    目标脚本：{scripts_dir} 目录下的 {script_name}
+    被测 app：{app_launch}
+    
+    {testcase_desc}
+    
+    前提条件解析结果：
+    {precondition_desc}
+    
+    {precondition_note}本次真实执行过的测试步骤（json 数组：tool 是工具名，input 是工具入参，
+    failed=true 表示这一步当时失败了、reason 是失败原因）；
+    其中的定位表达式都是当时在真机上真实存在、且已经验证可用的：
+    
+    {steps}
+    
+    {fixture_doc}
+    {code_rules}
+    {assert_rules}
+    {entry_doc}
+    必须严格按以下流程使用工具，不要臆测文件是否存在：
+    1. 先调用 list_scripts，确认 {script_name} 是否已经存在；
+    2. 已存在（上一轮生成过，本轮命中步骤缓存）：调用 read_script 读取内容，与上面的步骤 json
+       逐条对照，再调用 run_script **直接执行**复核，然后按执行结论分支处理：
+       a) 执行通过（exit code 0）-> 不必重写，直接给出 Final Answer；
+       b) **脚本执行步骤失败**（定位不到控件 / 等待超时 / 语法或导入错误 / 漏了测试步骤 /
+          定位表达式与本轮已验证的不一致 / 违反上面的代码规范 / 前置用例没有 import 复用）
+          -> 用 write_script 写入修复后的**完整**代码，然后再 run_script 确认，最多修复 2 轮，
+          直到除断言之外的执行步骤全部成功；
+       c) **断言成功/失败不在判断范围内**：纯断言失败（AssertionError，且输出里没有 appium /
+          定位 / 超时类异常）说明脚本本身跑得通，不要为了让断言变绿去改执行步骤，
+          在 Final Answer 里如实报告哪条断言失败、失败时实际取到的文本是什么即可；
+          唯一该改的断言缺陷是「照抄了采集那一刻的动态数值」（见上面的断言规范第 4 条）；
+       d) 同一个原因连续失败两次，说明不是改一行就能好的问题（多为设备/被测 app 状态），
+          立即停止修复并在 Final Answer 中说明，不要重复写入内容相同的代码；
+    3. 不存在：按上面的「代码规范」生成完整脚本，调用 write_script 保存，**保存完就结束** ——
+       write_script 只做语法检查 + 未定义名检查 + 落盘，落盘即完成；保存之后也**不要**再调用
+       run_script 去跑它。原因：本轮的步骤 json 就是第一环在真机上把这条用例（含断言）完整跑通
+       后记录下来的，脚本里每个定位表达式都刚刚验证过；落盘后再执行一遍等于把同一条用例重复跑
+       一次（多起一次 Appium session、多占设备几十秒），信息量几乎为零，还可能因为设备状态抖动
+       把本来正确的脚本误判成有问题、进而改坏它。需要确认脚本可用性时，在 Final Answer 里提示
+       开发者自己执行：`python -m pytest {scripts_dir}/{script_name}`；
+    4. 失败回执要按类型处置，不要一律当成脚本问题去改代码：
+       a) run_script 报环境类失败（Connection refused / Could not start a new session /
+          设备不在线 / InvalidSessionIdException）-> **不是脚本的问题**：不要为此改定位表达式，
+          直接在 Final Answer 里提示开发者启动 Appium server（默认 http://127.0.0.1:4723）、
+          用 `adb devices` 确认设备在线后重跑；
+       b) write_script 回执报「语法检查未通过」或「用到了从未导入 / 从未定义的名字」
+          -> 按回执给出的行号修正（通常是漏了 import re / from time import sleep）后重新写入；
+       c) 若发现步骤 json 里的定位表达式与测试步骤原文对不上（很可能是 app 改版、采集步骤已过期），
+          不要自己臆测新的 xpath / resource-id，直接在 Final Answer 中提示：用
+          `python src/app/generate_autoapp.py --testcase "{case_name}" --force-collect`
+          重新在真机上采集步骤；
+    5. failed=true 的步骤：不要原样照抄进脚本。先判断 reason ——
+       若是「滚动不够/控件还没渲染」这类时序问题，脚本里用 scroll_to + locate(timeout=...) 解决；
+       若是「定位表达式本身错了」而后续步骤又用了新的表达式成功，就采用成功的那一个；
+       若 reason 以「已拒绝执行」开头，说明第一环当时想用**用例原文之外**的界面文案，
+          被工具层的文案门禁拦下了（从未真正操作设备）：这类步骤绝对不能写进脚本，
+          也不要另找一个界面上相近的文案替代；在 Final Answer 里如实报告
+          「界面缺少用例原文文案『X』，疑似 app 版本/机型不匹配，需人工确认用例或换机型」；
+       若这一步最终没跑通，在脚本对应位置写注释说明「此步在采集时失败：<reason>」，
+       并在 Final Answer 里明确报告，不要假装它成功。
+    6. 结束后给出 Final Answer，说明：脚本绝对路径、执行结论（本轮新生成的写「已按第一环真实
+       执行过的步骤落盘，未重复执行」；复核已有脚本的写 执行通过 / 断言失败 / 修复了几轮、
+       修完是否已通过）、关键改动、以及有哪些步骤是采集时就失败因而需要人工确认的。
+    """
 
 
 def build_skip_message(reason: str, case: Optional[TestCase]) -> str:
@@ -1477,10 +1607,11 @@ def build_skip_message(reason: str, case: Optional[TestCase]) -> str:
     retry = (f'python src/app/generate_autoapp.py --testcase "{case.name}" --force-collect'
              if case else "python src/app/generate_autoapp.py --force-collect")
     return (
-        f"脚本未生成：{reason}\n"
-        "为避免落下只有 pass / 「待补充」的占位脚本（脚本一旦存在，后续运行容易被模型\n"
-        "当成「只需小修」而永远保留错误的定位表达式），本轮不调用代码生成 agent，也不写任何文件。\n"
-        f"排查上面的原因后重跑：{retry}"
+        f"""脚本未生成：{reason}
+        为避免落下只有 pass / 「待补充」的占位脚本（脚本一旦存在，后续运行容易被模型
+        当成「只需小修」而永远保留错误的定位表达式），本轮不调用代码生成 agent，也不写任何文件。
+        排查上面的原因后重跑：{retry}
+        """
     )
 
 
@@ -1503,18 +1634,21 @@ def build_precondition_note(refs: Sequence[PreconditionRef]) -> str:
         module = Path(ref.script_name).stem
         if ref.entry_name:
             lines.append(
-                f"- 「{ref.text}」由前置脚本 {ref.script_name} 提供，"
-                f"直接 `from src.app.scripts.{module} import {ref.entry_name}` 复用，"
-                f"在本用例的业务函数开头调用 {ref.entry_name}(driver)，**不要把它的步骤复制进来**；")
+                f"""- 「{ref.text}」由前置脚本 {ref.script_name} 提供，
+                - 「{ref.text}」由前置脚本 {ref.script_name} 提供，
+                    直接 `from src.app.scripts.{module} import {ref.entry_name}` 复用，
+                    在本用例的业务函数开头调用 {ref.entry_name}(driver)，**不要把它的步骤复制进来**；
+                """)
         else:
             lines.append(
-                f"- 「{ref.text}」对应前置脚本 {ref.script_name}，但它还没有可复用入口："
-                f"先 read_script 看清结构，按 APP_ENTRY_DOC 把业务步骤抽成 "
-                f"`def <语义名>(driver)` 并 write_script 回写（改的是**既有**前置脚本，"
-                f"回写后可以 run_script 复核一次；本轮新生成的目标脚本不要重复执行），"
-                f"再 import 复用；")
-    lines.append("- 前置脚本与本用例共用同一个 driver fixture（同一个 Appium session），"
-                 "不要在前置函数里再建 driver。")
+                f"""- 「{ref.text}」对应前置脚本 {ref.script_name}，但它还没有可复用入口：
+                    先 read_script 看清结构，按 APP_ENTRY_DOC 把业务步骤抽成 
+                    `def <语义名>(driver)` 并 write_script 回写（改的是**既有**前置脚本，
+                    回写后可以 run_script 复核一次；本轮新生成的目标脚本不要重复执行），
+                    再 import 复用；
+                - 前置脚本与本用例共用同一个 driver fixture（同一个 Appium session），
+                    不要在前置函数里再建 driver。
+                """)
     return "\n".join(lines) + "\n\n"
 
 
@@ -1876,7 +2010,7 @@ def _select_targets(all_cases: Sequence[TestCase]) -> tuple[list[Optional[TestCa
     跑用例文档里的全部用例**（setting.md 里有几条就跑几条）。
 
     曾经默认只跑第 1 条，后果很实在：setting.md 里第二条及以后新增的用例
-    （如「更多链接_打印」）永远不会被执行，看起来像「用例场景丢了」，实际只是没被选中
+    （如「更多连接_打印」）永远不会被执行，看起来像「用例场景丢了」，实际只是没被选中
     —— --list-cases 仍能完整列出，很容易误判成 md 解析问题。
     调试单条时显式加 --first-case，或用 --testcase 指定名字。
     """
@@ -1950,14 +2084,13 @@ def _apply_cli_overrides() -> None:
         logging.getLogger("app.cli").info("命令行覆盖用例文档 APP_TESTCASE_FILE=%s", TESTCASE_FILE)
 
 
-_USAGE = '''\
-用法：python src/app/generate_autoapp.py [选项]
+_USAGE = """用法：python src/app/generate_autoapp.py [选项]
 
   不带任何用例开关时，默认顺序跑用例文档里的**全部**用例（文档里有几条就跑几条）。
 
   用例范围（用例名 / 前提条件 / 测试步骤全部取自 md，默认 src/app/testcase/setting.md）：
   --list-cases           列出 md 里的全部用例（含启动参数 / 前置依赖 / 脚本 / 缓存状态）
-  --testcase NAME        只跑指定用例（支持写用例名的一部分，如「打印」「更多链接_打印」）
+  --testcase NAME        只跑指定用例（支持写用例名的一部分，如「打印」「更多连接_打印」）
                          别名 --case；也可用环境变量 APP_TESTCASE
   --all-cases / --all    跑 md 里的全部用例（与默认行为一致，写出来只为显式表达）
   --first-case / --first 只跑 md 里的第一条用例（调试单条时用）
@@ -1994,7 +2127,7 @@ _USAGE = '''\
                          python -m pytest src/app/scripts/<脚本名>
 
 返回码：0 全部成功；1 有用例失败或脚本没落盘；2 参数 / 用例选择错误。
-'''
+"""
 
 # 认识的全部命令行开关。校验它的理由很实在：这个入口一旦跑起来就会**连真机、起 Appium
 # session、调模型几十次**，而参数是手工解析的（sys.argv 里逐个找 flag）——
