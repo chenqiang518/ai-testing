@@ -872,37 +872,37 @@ def build_query(case: TestCase = CASE) -> str:
     precondition_steps = build_precondition_steps(case)
     precondition_block = f"\n{precondition_steps}\n" if precondition_steps else ""
     return f"""
-你是一个自动化测试工程师，接下来需要根据测试步骤，
-每一步骤的定位前提条件都是上一步骤操作完成返回的html，
-执行测试用例 -> {case.name}（取自用例文档 {TESTCASE_FILE}，标题层级：{case.hierarchy}），
-用例内容如下:
-{case.render()}
-{precondition_block}
-执行约束（务必遵守）:
-- 严格按「测试步骤」的顺序逐步执行，不要跳步、不要自行增删步骤；
-- 「前提条件」里若引用了其它用例（如「首页登录」），必须先在当前浏览器里把这些前置操作
-  全部做完（含其中的断言），再开始执行本用例的测试步骤；前提条件为「无」时不要凭空补登录；
-  前置操作的内容以上面「前置操作」段落给出的步骤原文为准（URL / 账号 / 密码照抄原文，
-  禁止臆造 example.com 这类占位地址）；前置操作里的「退出浏览器 / quit」一律跳过，
-  浏览器要留给本用例继续使用；该段落不存在时说明本用例没有前置操作，直接从第 1 步开始；
-- 「预期结果」以及步骤里写明「断言 ...」的内容，都必须真正调用工具验证，不要只在回答里口头判断；
-- 定位表达式只能取自工具返回的 html 摘要中真实存在的标签与属性，禁止凭经验臆测类名或层级；
-- css **不支持按文本定位**：`:contains()` / `:has-text()` 是 jQuery、Playwright 的语法，
-  Selenium 会直接抛 InvalidSelectorException，原样重试永远失败（实测有 agent 连试 7 次，
-  把整轮采集的轮次全烧光）。需要「点击『北京市』那一行左边的展开箭头」这类按可见文本定位时，
-  必须改用 xpath（css 参数以 // 开头即按 xpath 处理），把「行文本」与「目标小部件的 class」组合起来，例如
-      click(css="//tr[.//td[contains(., '北京市')]]//div[contains(@class, 'el-table__expand-icon')]")
-  目标小部件的 class 从 get_page_source 的摘要里找（摘要已包含 expand / arrow / switch 这类结构性元素）；
-- 同一个定位表达式失败过一次就**不要原样重试**：换一种写法（css <-> xpath）、或先 get_page_source
-  确认元素是否真的存在；连续两次同样失败说明思路错了，必须改换定位方式而不是继续重试；
-- 页面跳转后、或某一步定位失败后，先调用 get_page_source 重新获取当前页面元素，再继续下一步；
-  但同一页面不要连续重复调用 get_page_source：它每次都会返回一大段元素摘要，既浪费轮次也容易
-  顶穿模型上下文长度；已经知道选择器时直接 find / click / send_keys，只有选择器失效时才重新取摘要；
-- 断言统一使用 assert_contains 工具，多个期望文本用「、」分隔后一次传入
-  （期望有 3 项时形如 assert_contains(text="第一项、第二项、第三项")），
-  需要限定断言范围时再传 css 参数（如左侧导航栏容器）；
-- 每次只输出一个 action；全部步骤执行完成后必须调用 quit 关闭浏览器，然后给出 Final Answer。
-"""
+        你是一个自动化测试工程师，接下来需要根据测试步骤，
+        每一步骤的定位前提条件都是上一步骤操作完成返回的html，
+        执行测试用例 -> {case.name}（取自用例文档 {TESTCASE_FILE}，标题层级：{case.hierarchy}），
+        用例内容如下:
+        {case.render()}
+        {precondition_block}
+        执行约束（务必遵守）:
+        - 严格按「测试步骤」的顺序逐步执行，不要跳步、不要自行增删步骤；
+        - 「前提条件」里若引用了其它用例（如「首页登录」），必须先在当前浏览器里把这些前置操作
+          全部做完（含其中的断言），再开始执行本用例的测试步骤；前提条件为「无」时不要凭空补登录；
+          前置操作的内容以上面「前置操作」段落给出的步骤原文为准（URL / 账号 / 密码照抄原文，
+          禁止臆造 example.com 这类占位地址）；前置操作里的「退出浏览器 / quit」一律跳过，
+          浏览器要留给本用例继续使用；该段落不存在时说明本用例没有前置操作，直接从第 1 步开始；
+        - 「预期结果」以及步骤里写明「断言 ...」的内容，都必须真正调用工具验证，不要只在回答里口头判断；
+        - 定位表达式只能取自工具返回的 html 摘要中真实存在的标签与属性，禁止凭经验臆测类名或层级；
+        - css **不支持按文本定位**：`:contains()` / `:has-text()` 是 jQuery、Playwright 的语法，
+          Selenium 会直接抛 InvalidSelectorException，原样重试永远失败（实测有 agent 连试 7 次，
+          把整轮采集的轮次全烧光）。需要「点击『北京市』那一行左边的展开箭头」这类按可见文本定位时，
+          必须改用 xpath（css 参数以 // 开头即按 xpath 处理），把「行文本」与「目标小部件的 class」组合起来，例如
+              click(css="//tr[.//td[contains(., '北京市')]]//div[contains(@class, 'el-table__expand-icon')]")
+          目标小部件的 class 从 get_page_source 的摘要里找（摘要已包含 expand / arrow / switch 这类结构性元素）；
+        - 同一个定位表达式失败过一次就**不要原样重试**：换一种写法（css <-> xpath）、或先 get_page_source
+          确认元素是否真的存在；连续两次同样失败说明思路错了，必须改换定位方式而不是继续重试；
+        - 页面跳转后、或某一步定位失败后，先调用 get_page_source 重新获取当前页面元素，再继续下一步；
+          但同一页面不要连续重复调用 get_page_source：它每次都会返回一大段元素摘要，既浪费轮次也容易
+          顶穿模型上下文长度；已经知道选择器时直接 find / click / send_keys，只有选择器失效时才重新取摘要；
+        - 断言统一使用 assert_contains 工具，多个期望文本用「、」分隔后一次传入
+          （期望有 3 项时形如 assert_contains(text="第一项、第二项、第三项")），
+          需要限定断言范围时再传 css 参数（如左侧导航栏容器）；
+        - 每次只输出一个 action；全部步骤执行完成后必须调用 quit 关闭浏览器，然后给出 Final Answer。
+        """
 
 
 # 默认用例（不带 --case 时选中的那条）的 prompt；单独 import 本模块验证时也用它。
@@ -1998,39 +1998,39 @@ def codegen_input(case: TestCase = CASE) -> str:
 # 对外说明书，故按「用例范围 / 采集与前置 / 日志 / 环境变量 / 示例」分组，并把每个开关的
 # 同义写法都列全（少写一个别名，用户就会以为不支持）。
 USAGE = """用法：python src/web/generate_autoweb.py [开关]
-
-不带任何用例开关时，默认顺序跑用例文档里的**全部**用例（文档里有几条就跑几条）。
-
-用例范围：
-    --case <名称>              只跑指定用例（支持 `行政区域/区域名称`、末级标题如 `区域名称1`）
-    --all-cases, --all         顺序跑全部用例（与默认行为一致，写出来只为显式表达）
-    --first-case, --first      只跑文档里的第一条用例（旧默认行为，调试单条时用）
-    --list-cases, --list       只打印用例清单（用例名/标题层级/脚本名/前提条件依赖），不调大模型
-    --case-file <md>           换一份用例文档（相对路径按仓库根目录解析）
-
-采集与前置：
-    --force-collect            忽略步骤缓存（src/web/.steps/*.steps.json），重新开浏览器采集真实步骤
-    --no-deps                  不自动准备前置脚本，等价于 SKIP_PRECONDITION=1
-                               同义写法：--no-precondition / --skip-precondition
-
-日志：
-    --quiet, --no-debug        只留业务 print 与最终答案，等价于 LANGCHAIN_DEBUG=0
-    --debug                    打开调试日志（默认已打开，写出来只为显式表达）
-    --debug-events=<事件>      指定打印哪几类 tracer 事件：all / llm / tool / chain 及其组合
-                               如 --debug-events=all、--debug-events=chain,tool
-    --hide-debug-events=<事件> 在默认基础上再隐藏某几类，如 --hide-debug-events=llm/end
-
-环境变量：
-    WEB_TESTCASE_FILE 用例文档    WEB_TESTCASE 用例名    FORCE_COLLECT 强制重采
-    SKIP_PRECONDITION 跳过前置    LANGCHAIN_DEBUG / LANGCHAIN_DEBUG_EVENTS 日志开关
-
-示例：
-    python src/web/generate_autoweb.py                     # 文档里的全部用例
-    python src/web/generate_autoweb.py --case 区域名称1     # 只跑一条（末级标题即可匹配）
-    python src/web/generate_autoweb.py --first-case        # 只跑第一条
-    python src/web/generate_autoweb.py --list-cases        # 先看有哪些用例
-    python src/web/generate_autoweb.py --force-collect --quiet
-"""
+    
+    不带任何用例开关时，默认顺序跑用例文档里的**全部**用例（文档里有几条就跑几条）。
+    
+    用例范围：
+        --case <名称>              只跑指定用例（支持 `行政区域/区域名称`、末级标题如 `区域名称1`）
+        --all-cases, --all         顺序跑全部用例（与默认行为一致，写出来只为显式表达）
+        --first-case, --first      只跑文档里的第一条用例（旧默认行为，调试单条时用）
+        --list-cases, --list       只打印用例清单（用例名/标题层级/脚本名/前提条件依赖），不调大模型
+        --case-file <md>           换一份用例文档（相对路径按仓库根目录解析）
+    
+    采集与前置：
+        --force-collect            忽略步骤缓存（src/web/.steps/*.steps.json），重新开浏览器采集真实步骤
+        --no-deps                  不自动准备前置脚本，等价于 SKIP_PRECONDITION=1
+                                   同义写法：--no-precondition / --skip-precondition
+    
+    日志：
+        --quiet, --no-debug        只留业务 print 与最终答案，等价于 LANGCHAIN_DEBUG=0
+        --debug                    打开调试日志（默认已打开，写出来只为显式表达）
+        --debug-events=<事件>      指定打印哪几类 tracer 事件：all / llm / tool / chain 及其组合
+                                   如 --debug-events=all、--debug-events=chain,tool
+        --hide-debug-events=<事件> 在默认基础上再隐藏某几类，如 --hide-debug-events=llm/end
+    
+    环境变量：
+        WEB_TESTCASE_FILE 用例文档    WEB_TESTCASE 用例名    FORCE_COLLECT 强制重采
+        SKIP_PRECONDITION 跳过前置    LANGCHAIN_DEBUG / LANGCHAIN_DEBUG_EVENTS 日志开关
+    
+    示例：
+        python src/web/generate_autoweb.py                     # 文档里的全部用例
+        python src/web/generate_autoweb.py --case 区域名称1     # 只跑一条（末级标题即可匹配）
+        python src/web/generate_autoweb.py --first-case        # 只跑第一条
+        python src/web/generate_autoweb.py --list-cases        # 先看有哪些用例
+        python src/web/generate_autoweb.py --force-collect --quiet
+    """
 
 
 def print_usage() -> None:

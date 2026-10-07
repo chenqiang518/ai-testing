@@ -20,6 +20,9 @@ htmlcov/
 cache/
 # AI 采集的浏览器步骤缓存（内容取决于线上页面实时结构，属机器产物，不提交）
 .steps/
+# 运行轨迹日志（历史上 generate_autoapp 会往 src/app/logs/ 写 run_*.log，现已改为只打控制台；
+# 保留这条规则做兜底：万一有工具再往这里落盘，机器产物也不会被误提交）
+src/*/logs/
 
 # ---- IDE / 编辑器 ----
 .idea/
