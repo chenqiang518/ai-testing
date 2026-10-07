@@ -19,7 +19,7 @@ def driver():
 
 
 # 行政区域_区域名称 测试函数
-def administrative_area_region_name3(driver):
+def administrative_area_region_name(driver):
     # 使用复用的login函数进行登录
     login(driver)
 
@@ -63,6 +63,6 @@ def administrative_area_region_name3(driver):
     assert '110101' in aggregated_dongcheng, '缺少 110101'
 
 
-def test_administrative_area_region_name3(driver):
+def test_administrative_area_region_name(driver):
     """pytest 入口：业务流程复用 administrative_area_region_name3(driver)，便于其它用例脚本 import 复用（勿删）。"""
-    administrative_area_region_name3(driver)
+    administrative_area_region_name(driver)

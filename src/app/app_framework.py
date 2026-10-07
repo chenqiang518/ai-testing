@@ -20,7 +20,7 @@ class AppAutoFramework:
                 # 设置 appium 驱动
                 "appium:automationName": "uiautomator2",
                 # 设置设备名称
-                "appium:deviceName": "192.168.3.6:5555",
+                "appium:deviceName": "192.168.1.2:5555",
                 # 设置为超时时间为 60 秒
                 "adbExecTimeout": 60000,
 
